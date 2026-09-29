@@ -1,0 +1,8 @@
+spines: 2
+leaves: 3
+hosts_per_leaf: 4
+
+# Uplink volutamente limitato per i test QoS.
+uplink_bw_mbps: 60
+host_bw_mbps: 100
+link_delay_ms: 1
