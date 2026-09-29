@@ -9,14 +9,14 @@ from model import NetworkModel
 
 class SpineLeafTopo(Topo):
     def build(self):
-        # Inizializza il modello leggendo i file da config/
-        self.net_model = NetworkModel(config_dir='config')
-        
-        uplink_bw = self.net_model.topology.get('uplink_bw_mbps', 60)
-        host_bw = self.net_model.topology.get('host_bw_mbps', 100)
-        link_delay = f"{self.net_model.topology.get('link_delay_ms', 1)}ms"
 
-        spines = []
+        self.net_model = NetworkModel(config_dir='config')
+
+        uplink_bw = self.net_model.topology.get('uplink_bw_mbps')
+        host_bw = self.net_model.topology.get('host_bw_mbps')
+        link_delay = f"{self.net_model.topology.get('link_delay_ms', 1)}ms" #Da valutare
+
+        spines = [] #liste di switch
         leaves = []
 
         # Creazione degli switch Spine

@@ -8,7 +8,7 @@ class ConfigValidationError(Exception):
     pass
 
 @dataclass
-class HostConfig:
+class HostModel:
     name: str
     leaf: str
     port: int
@@ -26,16 +26,16 @@ class HostConfig:
 
 
 @dataclass
-class TenantConfig:
+class TenantModel:
     name: str
     tag: int
     rate_mbps: int
     subnet: str
-    hosts: List[HostConfig]
+    hosts: List[HostModel]
 
     def __post_init__(self):
         if self.hosts and isinstance(self.hosts[0], dict):
-            self.hosts = [HostConfig(**h) for h in self.hosts]
+            self.hosts = [HostModel(**h) for h in self.hosts]
 
 
 class NetworkModel:
@@ -67,7 +67,7 @@ class NetworkModel:
             self.hosts_per_leaf = self.topology.get('hosts_per_leaf', 0)
 
             for t_data in tenants_data.get('tenants', []):
-                self.tenants.append(TenantInfo(**t_data))
+                self.tenants.append(TenantModel(**t_data))
 
             self.validate_configuration()
 
@@ -112,7 +112,7 @@ class NetworkModel:
 
 #tobechecked
 
-def is_leaf(self, dpid):
+    def is_leaf(self, dpid):
         return 1 <= int(dpid) <= self.leaves
 
     def is_spine(self, dpid):
