@@ -1,0 +1,3 @@
+.venv/
+.venv/pyvenv.cfg
+src/__pycache__/

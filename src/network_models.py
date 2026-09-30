@@ -137,7 +137,7 @@ class NetworkModel:
                 host_id = (leaf_id - 1) * self.hosts_per_leaf + port
                 host_name = f"h{host_id}"
                 if host_name not in assigned:
-                    spare_hosts.append(HostInfo(name=host_name, leaf=f"leaf{leaf_id}", port=port))
+                    spare_hosts.append(HostModel(name=host_name, leaf=f"leaf{leaf_id}", port=port))
         return spare_hosts
 
     def get_all_hosts_dict(self):
@@ -190,14 +190,14 @@ class NetworkModel:
             except StopIteration:
                 raise ConfigValidationError(f"IP insufficienti nella subnet {subnet} per l'host {h_name}.")
             
-            new_hosts.append(HostInfo(
+            new_hosts.append(HostModel(
                 name=base_host.name,
                 leaf=base_host.leaf,
                 port=base_host.port,
                 ip=assigned_ip
             ))
 
-        new_tenant = TenantInfo(name=name, tag=tag, rate_mbps=rate_mbps, subnet=subnet, hosts=new_hosts)
+        new_tenant = TenantModel(name=name, tag=tag, rate_mbps=rate_mbps, subnet=subnet, hosts=new_hosts)
         self.tenants.append(new_tenant)
         
         try:
