@@ -1,2 +1,4 @@
 PyYAML>=6.0.1
 mininet
+ryu==4.34
+eventlet==0.30.2
