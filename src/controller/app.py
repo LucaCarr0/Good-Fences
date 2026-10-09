@@ -7,6 +7,7 @@ from ryu.controller.handler import (
 from ryu.lib import hub
 from ryu.ofproto import ofproto_v1_3
 from network_models import NetworkModel
+from controller.arp_proxy import build_arp_reply
 from controller.pipeline import base_tables, install_base_pipeline
 
 
@@ -16,6 +17,7 @@ class GoodFencesApp(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model = NetworkModel(config_dir='config')
+        self.access_hosts, self.tenant_hosts = self.model.get_arp_bindings()
         self.expected_dpids = (
             set(range(1, self.model.leaves + 1))
             | set(range(101, 101 + self.model.spines))
@@ -65,6 +67,27 @@ class GoodFencesApp(app_manager.RyuApp):
             self.pending.pop(dp.id, None)
             self.logger.error('Timeout installazione DPID=%016x', dp.id)
             dp.close()
+
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def packet_in_handler(self, ev):
+        msg, dp = ev.msg, ev.msg.datapath
+        if self.datapaths.get(dp.id) is not dp or dp.id not in self.ready:
+            return
+        in_port = msg.match.get('in_port')
+        binding = self.access_hosts.get((dp.id, in_port))
+        if binding is None or msg.table_id != 0: #solo le tabelle 0 hanno regole che contattano direttamente il controller
+            return
+        if len(msg.data) < msg.total_len: #controllo integrità del messaggio
+            return
+
+        reply_data = build_arp_reply(msg.data, binding, self.tenant_hosts)
+        if reply_data is None:
+            return
+        ofp, parser = dp.ofproto, dp.ofproto_parser
+        dp.send_msg(parser.OFPPacketOut(
+            datapath=dp, buffer_id=ofp.OFP_NO_BUFFER,
+            in_port=ofp.OFPP_CONTROLLER,
+            actions=[parser.OFPActionOutput(in_port)], data=reply_data))
 
     @set_ev_cls(ofp_event.EventOFPBarrierReply, [CONFIG_DISPATCHER, MAIN_DISPATCHER])
     def barrier_reply_handler(self, ev):

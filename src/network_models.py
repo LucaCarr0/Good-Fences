@@ -162,6 +162,18 @@ class NetworkModel:
                     return tenant
         return None
 
+    def get_arp_bindings(self):
+        """Snapshot delle porte assegnate e degli indirizzi, separati per tenant."""
+        access_hosts = {}
+        tenant_hosts = {}
+        for tenant in self.tenants:
+            for host in tenant.hosts:
+                leaf_id = int(re.search(r'\d+', host.leaf).group())
+                access_hosts[(leaf_id, host.port)] = (tenant.tag, host)
+                if host.ip:
+                    tenant_hosts[(tenant.tag, host.ip)] = host
+        return access_hosts, tenant_hosts
+
     def add_tenant(self, name, tag, rate_mbps, subnet, host_names):
         if any(t.name == name for t in self.tenants):
             raise ConfigValidationError(f"Impossibile creare il tenant: {name} esiste già.")
