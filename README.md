@@ -45,7 +45,7 @@ sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
 ```text
 h2 ip neigh flush dev h2-eth0
 h2 ping -n -c 1 -W 1 h6
-h2 ip neigh show h6
+h2 ip neigh show 10.0.0.2
 ```
 
 3. Dal terminale Linux, vedere le tabelle dopo la richiesta:
@@ -57,3 +57,15 @@ sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
 Risultato atteso: aumenta `n_packets` della regola ARP su `leaf1-eth2`
 e la cache di h2 mostra `lladdr 00:00:00:00:00:06` (h6).
 Il ping genera prima ARP, ma fallisce perché manca il forwarding IP.
+
+### Risultati attesi da h1
+
+Prima di ogni caso: `h1 ip neigh flush dev h1-eth0`. Dopo il ping,
+controllare la cache con `h1 ip neigh show`.
+
+| Caso | Comando CLI Mininet | Risultato atteso |
+| --- | --- | --- |
+| 1: stesso tenant | `h1 ping -c 1 -W 1 h5` | ARP risolto: `.2` → `00:00:00:00:00:05` (`REACHABLE` o `STALE`). Ping fallisce: manca forwarding IP. |
+| 2: altro tenant, stesso IP | `h1 ping -c 1 -W 1 h6` | Stesso risultato del caso 1: h6 ha lo stesso IP di h5, quindi h1 risolve il MAC di h5 nel tenant A. |
+| 3: IP assente nel tenant A | `h1 ping -c 1 -W 1 h10` | `10.0.0.13` senza MAC: `INCOMPLETE`, poi `FAILED`. Nessuna risposta ARP. |
+| 4: subnet diversa | `h1 ping -c 1 -W 1 h7` | `Network is unreachable`: manca una route verso `10.0.1.0/24`, nessuna richiesta ARP. |
