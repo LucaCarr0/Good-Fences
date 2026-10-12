@@ -35,9 +35,10 @@ def install_base_pipeline(datapath, model):
         out_group=ofp.OFPG_ANY, cookie=0, cookie_mask=0,
         match=parser.OFPMatch()))
     
-    #INIZIALIZZAZIONE TABELLE CON DEFAULT DROP
-        
+    #INIZIALIZZAZIONE TABELLE 
+    
     for table_id in tables:
+        #DEFAULT DROP
         datapath.send_msg(parser.OFPFlowMod(
             datapath=datapath, cookie=BASE_COOKIE,
             command=ofp.OFPFC_ADD, table_id=table_id,
@@ -50,6 +51,7 @@ def install_base_pipeline(datapath, model):
         for leaf_id, port in access_hosts:
             if leaf_id != datapath.id:
                 continue
+            #REGOLA ARP - SOLO LEAF -
             datapath.send_msg(parser.OFPFlowMod(
                 datapath=datapath, cookie=BASE_COOKIE,
                 table_id=0, priority=100,

@@ -16,45 +16,44 @@ La risposta untagged torna soltanto alla porta richiedente. Gli ARP non vengono
 inoltrati agli spine; le altre tabelle mantengono default drop.
 
 La logica del protocollo e' in `src/controller/arp_proxy.py`: la funzione
-`build_arp_reply` valida la richiesta e restituisce il frame di risposta oppure
-`None`. `app.py` gestisce l'evento PacketIn, i controlli sul datapath e l'invio
+`build_arp_reply` controlla il tipo di richiesta e la destinazione e restituisce
+il frame di risposta oppure `None`. `app.py` gestisce l'evento PacketIn,
+i controlli sul datapath e l'invio
 PacketOut alla porta richiedente.
 
-Sono scartati mittenti con IP/MAC incoerenti, destinazioni sconosciute,
-probe e gratuitous ARP, frame tagged e traffico dalle porte spare o dagli uplink.
+Sono scartate le destinazioni sconosciute nel tenant del richiedente.
+Le regole OpenFlow scartano frame tagged e traffico dalle porte spare o dagli uplink.
+La versione corrente non verifica la coerenza di IP/MAC del mittente e non
+scarta esplicitamente probe e gratuitous ARP.
 Non sono ancora implementati forwarding IP, apprendimento dinamico e rate limiting
 delle richieste verso il controller. Un ping quindi fallisce anche se ARP riesce.
 I binding sono caricati all'avvio: future modifiche runtime ai tenant dovranno
 aggiornare sia gli indici del controller sia le regole delle porte.
 
-### Test automatici
+### Test rapido del proxy ARP
 
-Dalla radice del progetto:
+Con controller e rete avviati, attendere `ALL SWITCHES READY`.
+
+1. Dal terminale Linux, vedere le tabelle prima della richiesta:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
 ```
 
-I test verificano risposte serializzate, isolamento degli IP sovrapposti,
-scarto delle richieste non valide e regole OpenFlow senza flooding.
-
-### Verifica in Mininet
-
-Avviare controller e rete con gli script in `scripts/`. Attendere
-`ALL SWITCHES READY`, quindi nella CLI Mininet:
+2. Dalla CLI Mininet, svuotare la cache e generare la richiesta:
 
 ```text
-h1 ip neigh flush all
-h1 ping -c 1 -W 1 10.0.0.2
-h1 ip neigh show 10.0.0.2
-h2 ip neigh flush all
-h2 ping -c 1 -W 1 10.0.0.2
-h2 ip neigh show 10.0.0.2
+h2 ip neigh flush dev h2-eth0
+h2 ping -n -c 1 -W 1 h6
+h2 ip neigh show h6
 ```
 
-Il ping deve fallire, ma la neighbor entry di h1 deve contenere
-`00:00:00:00:00:05` (h5), quella di h2 `00:00:00:00:00:06` (h6).
-Con una cattura ARP attiva sugli uplink durante la prova, verificare che non
-compaiano richieste o risposte. Nella topologia corrente gli uplink dei leaf
-sono le porte 5 e 6. Ripetere dopo una riconnessione del leaf al controller
-per verificare la reinstallazione delle regole.
+3. Dal terminale Linux, vedere le tabelle dopo la richiesta:
+
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
+```
+
+Risultato atteso: aumenta `n_packets` della regola ARP su `leaf1-eth2`
+e la cache di h2 mostra `lladdr 00:00:00:00:00:06` (h6).
+Il ping genera prima ARP, ma fallisce perché manca il forwarding IP.
