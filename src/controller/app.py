@@ -8,7 +8,7 @@ from ryu.lib import hub
 from ryu.ofproto import ofproto_v1_3
 from network_models import NetworkModel
 from controller.arp_proxy import build_arp_reply
-from controller.pipeline import base_tables, install_base_pipeline
+from controller.pipeline import base_tables, install_entry_tables
 
 
 class GoodFencesApp(app_manager.RyuApp):
@@ -54,7 +54,7 @@ class GoodFencesApp(app_manager.RyuApp):
             
         self.datapaths[dp.id] = dp
         self.ready.discard(dp.id)
-        install_base_pipeline(dp, self.model)
+        install_entry_tables(dp, self.model)
         barrier = dp.ofproto_parser.OFPBarrierRequest(dp)
         dp.set_xid(barrier)
         self.pending[dp.id] = (dp, barrier.xid)
@@ -96,7 +96,7 @@ class GoodFencesApp(app_manager.RyuApp):
             return
         self.pending.pop(dp.id)
         self.ready.add(dp.id)
-        self.logger.info('BASE READY DPID=%016x tabelle=%s (%d/%d)',
+        self.logger.info('PIPELINE READY DPID=%016x tabelle=%s (%d/%d)',
                          dp.id, base_tables(self.model, dp.id),
                          len(self.ready), len(self.expected_dpids))
         if self.ready == self.expected_dpids:

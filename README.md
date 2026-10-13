@@ -22,9 +22,9 @@ i controlli sul datapath e l'invio
 PacketOut alla porta richiedente.
 
 Sono scartate le destinazioni sconosciute nel tenant del richiedente.
-Le regole OpenFlow scartano frame tagged e traffico dalle porte spare o dagli uplink.
-La versione corrente non verifica la coerenza di IP/MAC del mittente e non
-scarta esplicitamente probe e gratuitous ARP.
+Le regole OpenFlow scartano frame tagged dalle porte host e ARP dalle porte spare
+o dagli uplink. Flow e proxy verificano MAC Ethernet, MAC ARP e IP sorgente contro
+il binding della porta. Probe e gratuitous ARP vengono scartati esplicitamente.
 Non sono ancora implementati forwarding IP, apprendimento dinamico e rate limiting
 delle richieste verso il controller. Un ping quindi fallisce anche se ARP riesce.
 I binding sono caricati all'avvio: future modifiche runtime ai tenant dovranno
@@ -69,3 +69,34 @@ controllare la cache con `h1 ip neigh show`.
 | 2: altro tenant, stesso IP | `h1 ping -c 1 -W 1 h6` | Stesso risultato del caso 1: h6 ha lo stesso IP di h5, quindi h1 risolve il MAC di h5 nel tenant A. |
 | 3: IP assente nel tenant A | `h1 ping -c 1 -W 1 h10` | `10.0.0.13` senza MAC: `INCOMPLETE`, poi `FAILED`. Nessuna risposta ARP. |
 | 4: subnet diversa | `h1 ping -c 1 -W 1 h7` | `Network is unreachable`: manca una route verso `10.0.1.0/24`, nessuna richiesta ARP. |
+
+
+## Sprint 1.2: classificazione IPv4
+
+IPv4 untagged dalle porte assegnate viene ammesso solo con MAC/IP sorgenti del
+modello, riceve la VLAN del tenant e attraversa le tabelle 0 → 1 → 2, dove termina
+in DROP. Dagli uplink sono ammessi soltanto IPv4 con VLAN nota, sempre fino al DROP
+finale. Spare e ingressi non ammessi ricadono nel default DROP a priorità 0;
+non ci sono DROP generici per porta a priorità 100.
+
+Avvio dalla radice, in due terminali:
+
+```bash
+bash scripts/start-controller.sh
+bash scripts/start-network.sh
+```
+
+Attendere `ALL SWITCHES READY: 5/5`. La Barrier conferma l'intera installazione.
+Per ispezionare manualmente le regole:
+
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=0
+sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=1
+sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=2
+```
+
+La [procedura manuale dello sprint](docs/pipeline.md) riporta matrice delle regole,
+trace, lettura dei contatori, comandi dalla CLI Mininet per frame falsificati,
+catture ARP e riconnessione. Non sono presenti suite o script di test automatizzati.
+Il forwarding resta da implementare: un ping fallito da solo non verifica
+l'anti-spoofing. Le verifiche documentate indicano risultati attesi.

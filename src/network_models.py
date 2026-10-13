@@ -1,4 +1,5 @@
 import re
+import ipaddress
 import os
 import yaml
 from dataclasses import dataclass, field
@@ -74,17 +75,25 @@ class NetworkModel:
     def validate_configuration(self):
         tags = set()
         assigned_hosts = set()
-
+        assigned_ports = set()
+        ips = set()
+        
         for tenant in self.tenants:
-            if tenant.tag is not None:
-                if not (1 <= tenant.tag <= 4094):
-                    raise ConfigValidationError(f"Tag VLAN {tenant.tag} non valido nel tenant {tenant.name}.")
-                if tenant.tag in tags:
-                    raise ConfigValidationError(f"Tag VLAN {tenant.tag} duplicato trovato nel tenant {tenant.name}.")
-                tags.add(tenant.tag)
+            if type(tenant.tag) is not int:
+                raise ConfigValidationError(f"Tag VLAN mancante o non intero nel tenant {tenant.name}.")
+            if not (1 <= tenant.tag <= 4094):
+                raise ConfigValidationError(f"Tag VLAN {tenant.tag} non valido nel tenant {tenant.name}.")
+            if tenant.tag in tags:
+                raise ConfigValidationError(f"Tag VLAN {tenant.tag} duplicato trovato nel tenant {tenant.name}.")
+            tags.add(tenant.tag)
 
-            ips = set()
             for host in tenant.hosts:
+                try:
+                    address = ipaddress.IPv4Address(host.ip)
+                except (ipaddress.AddressValueError, TypeError):
+                    raise ConfigValidationError(f"IPv4 mancante o non valido per {host.name}: {host.ip}")
+                if str(address) != host.ip or address.is_unspecified:
+                    raise ConfigValidationError(f"IPv4 non utilizzabile per {host.name}: {host.ip}")
                 if host.ip:
                     if host.ip in ips:
                         raise ConfigValidationError(f"IP {host.ip} duplicato nel tenant {tenant.name}.")
@@ -103,6 +112,11 @@ class NetworkModel:
                     raise ConfigValidationError(f"Leaf ID {leaf_id} inesistente per l'host {host.name}.")
                 if not (1 <= host.port <= self.hosts_per_leaf):
                     raise ConfigValidationError(f"Porta {host.port} non valida sul leaf {leaf_id} per l'host {host.name}.")
+
+                port_binding = (leaf_id, host.port)
+                if port_binding in assigned_ports:
+                    raise ConfigValidationError(f"Porta {host.port} del leaf {leaf_id} assegnata più volte.")
+                assigned_ports.add(port_binding)
 
                 expected_host_id = (leaf_id - 1) * self.hosts_per_leaf + host.port
                 if host.host_id != expected_host_id:
