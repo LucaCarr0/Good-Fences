@@ -1,13 +1,79 @@
 """Verifica frame di attacco e cattura senza richiedere una rete attiva."""
 import unittest
+from io import StringIO
 from unittest.mock import patch
 
-from scapy.all import ARP, IP, Dot1Q, Ether
+from scapy.all import ARP, IP, UDP, Dot1Q, Ether
 
-from packet_io import build_packet, capture, describe_packet
+from packet_io import (build_ecmp_packets, build_packet, capture, describe_packet,
+                       main, parse_args, send_ecmp_packets)
 
 
 class PacketIoTests(unittest.TestCase):
+    def test_ecmp_generates_distinct_udp_tuples_with_configured_addresses(self):
+        packets = list(build_ecmp_packets('00:00:00:00:00:02', '10.0.0.1',
+                                         '10.0.0.3', '00:00:00:00:00:08', 100))
+        tuples = {(pkt[IP].src, pkt[IP].dst, pkt[IP].proto,
+                   pkt[UDP].sport, pkt[UDP].dport) for pkt in packets}
+        self.assertEqual(len(tuples), 100)
+        self.assertEqual({pkt[UDP].sport for pkt in packets}, set(range(40000, 40100)))
+        for packet in packets:
+            self.assertEqual((packet[Ether].src, packet[Ether].dst),
+                             ('00:00:00:00:00:02', '00:00:00:00:00:08'))
+            self.assertEqual((packet[IP].src, packet[IP].dst, packet[IP].proto),
+                             ('10.0.0.1', '10.0.0.3', 17))
+            self.assertEqual(packet[UDP].dport, 9000)
+            self.assertNotIn(Dot1Q, packet)
+
+    @patch('packet_io.conf.L2socket')
+    def test_ecmp_sends_each_flow_and_reports_completed_packet_count(self, socket):
+        packets = build_ecmp_packets('00:00:00:00:00:02', '10.0.0.1',
+                                    '10.0.0.2', '00:00:00:00:00:06', 2)
+        self.assertEqual(send_ecmp_packets('h1-eth0', packets, 3), 6)
+        socket.assert_called_once_with(iface='h1-eth0')
+        sender = socket.return_value.__enter__.return_value
+        self.assertEqual(sender.send.call_count, 6)
+        self.assertEqual([call.args[0][UDP].sport for call in sender.send.call_args_list],
+                         [40000, 40000, 40000, 40001, 40001, 40001])
+
+    def test_ecmp_argument_defaults_and_highest_valid_source_port(self):
+        args = parse_args(['--iface', 'h1-eth0', '--case', 'ecmp-udp'])
+        self.assertEqual((args.flows, args.packets_per_flow), (100, 10))
+        args = parse_args(['--iface', 'h1-eth0', '--case', 'ecmp-udp',
+                           '--flows', '25536', '--packets-per-flow', '1'])
+        self.assertEqual(args.flows, 25536)
+        self.assertEqual(args.packets_per_flow, 1)
+
+    def test_ecmp_rejects_invalid_counts_and_options_in_other_modes(self):
+        invalid = [(['--case', 'ecmp-udp', '--flows', '0']),
+                   (['--case', 'ecmp-udp', '--flows', '-1']),
+                   (['--case', 'ecmp-udp', '--flows', '25537']),
+                   (['--case', 'ecmp-udp', '--packets-per-flow', '0']),
+                   (['--case', 'ecmp-udp', '--packets-per-flow', '-1']),
+                   (['--case', 'ipv4-untagged', '--flows', '10']),
+                   (['--case', 'arp-request', '--packets-per-flow', '10']),
+                   (['--listen', '--flows', '10'])]
+        for options in invalid:
+            with self.subTest(options=options), patch('sys.stderr', new_callable=StringIO):
+                with self.assertRaises(SystemExit) as error:
+                    parse_args(['--iface', 'h1-eth0', *options])
+                self.assertEqual(error.exception.code, 2)
+
+    @patch('packet_io.send_ecmp_packets', return_value=6)
+    @patch('sys.stdout', new_callable=StringIO)
+    def test_ecmp_cli_prints_offered_traffic_and_completed_packets(self, output, send):
+        main(['--iface', 'h1-eth0', '--case', 'ecmp-udp',
+              '--flows', '2', '--packets-per-flow', '3'])
+        self.assertIn('Ethernet: 00:00:00:00:00:02 -> 00:00:00:00:00:06',
+                      output.getvalue())
+        self.assertIn('IPv4: 10.0.0.1 -> 10.0.0.2', output.getvalue())
+        self.assertIn('Porte UDP: 40000-40001 -> 9000', output.getvalue())
+        self.assertIn('Traffico offerto: 2 flussi UDP, 3 pacchetti per flusso'
+                      ' (6 pacchetti).', output.getvalue())
+        self.assertIn('Pacchetti effettivamente inviati: 6', output.getvalue())
+        self.assertEqual(send.call_args.args[0], 'h1-eth0')
+        self.assertEqual(send.call_args.args[2], 3)
+
     def test_overlapping_ip_attack_keeps_explicit_victim_mac(self):
         packet = build_packet('ipv4-untagged', '00:00:00:00:00:02',
                               '10.0.0.1', '10.0.0.1', '00:00:00:00:00:04')

@@ -71,18 +71,26 @@ controllare la cache con `h1 ip neigh show`.
 | 4: subnet diversa | `h1 ping -c 1 -W 1 h7` | `Network is unreachable`: manca una route verso `10.0.1.0/24`, nessuna richiesta ARP. |
 
 
-## Sprint 1.3: forwarding unicast isolato
+## Forwarding unicast isolato con ECMP
 
 IPv4 untagged dalle porte assegnate viene ammesso solo con MAC/IP sorgenti del
 modello e riceve la VLAN del tenant in tabella 0. La tabella 1 ammette soltanto
 destinazioni con VLAN, MAC e IP coerenti con un host del tenant; la tabella 2
-consegna sul leaf locale togliendo la VLAN oppure inoltra verso spine1.
-Il solo uplink attivo è `hosts_per_leaf + 1` (porta 5 nella configurazione
-attuale). Gli altri uplink e spine2 restano in DROP. Dal primo uplink si può
-consegnare solo a host locali: non esiste un percorso uplink → uplink.
-Spine1 conserva la VLAN e inoltra sul leaf di destinazione, mai sulla porta di
-ingresso. Spare e ingressi non ammessi ricadono nel default DROP a priorità 0.
-Non sono introdotti ECMP, meter, gruppi, NORMAL o FLOOD.
+consegna sul leaf locale togliendo la VLAN oppure richiama il gruppo ECMP.
+Ogni leaf ha un gruppo OpenFlow SELECT con ID `1`: i due bucket hanno peso `1`
+e inoltrano agli uplink del modello, porte **5 verso spine1** e **6 verso spine2**
+nella configurazione attuale. Entrambi gli uplink ammettono IPv4 con VLAN nota.
+Dalla fabric si può consegnare solo a host locali: non esiste un percorso
+uplink → uplink. Entrambi gli spine conservano la VLAN e inoltrano sul leaf di
+destinazione, mai sulla porta di ingresso. Spare e ingressi non ammessi ricadono
+nel default DROP a priorità 0. Isolamento, binding sorgente e proxy ARP restano
+invariati. Non sono introdotti meter, NORMAL o FLOOD.
+
+La funzione di supporto ECMP è direttamente in `src/controller/pipeline.py`.
+All'avvio e alla riconnessione il controller rimuove i vecchi flow, ripristina i
+DROP e ricrea soltanto il proprio gruppo ECMP. Una prima Barrier conferma questa
+preparazione prima di inviare i flow che usano il gruppo; la Barrier finale
+conferma l'intera pipeline. Errori OpenFlow o timeout impediscono lo stato READY.
 
 Avvio dalla radice, in due terminali:
 
@@ -91,16 +99,18 @@ bash scripts/start-controller.sh
 bash scripts/start-network.sh
 ```
 
-Attendere `ALL SWITCHES READY: 5/5`. La Barrier conferma l'intera installazione.
+Attendere `ALL SWITCHES READY: 5/5`, dopo entrambe le fasi di installazione.
 Per ispezionare manualmente le regole:
 
 ```bash
 sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=0
 sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=1
 sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=2
+sudo ovs-ofctl -O OpenFlow13 dump-groups leaf1
+sudo ovs-ofctl -O OpenFlow13 dump-group-stats leaf1
 ```
 
-La [procedura manuale dello sprint](docs/pipeline.md) riporta matrice delle regole,
+La [procedura manuale della pipeline](docs/pipeline.md) riporta matrice delle regole,
 trace, lettura dei contatori, comandi dalla CLI Mininet per frame falsificati,
 catture ARP e riconnessione. Include i comandi dell'utility
 `tests/network/packet_io.py` per aggiungere ARP Probe, Gratuitous ARP, RARP,
@@ -124,7 +134,7 @@ h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case arp-probe
 
 Il caso `arp-request` invia una richiesta ARP normale verso h6: è attesa una
 risposta del proxy. Per `arp-probe` sono invece attese zero risposte.
-Ogni comando invia un frame e mostra richiesta e risposte con MAC, IP,
+Questi due comandi inviano un frame e mostrano richiesta e risposte con MAC, IP,
 operazione e VLAN leggibili, senza stringhe esadecimali. La verifica si fa
 manualmente confrontando i contatori di `ovs-ofctl dump-flows` prima e dopo.
 
@@ -183,7 +193,7 @@ può quindi incrementare due regole distinte, una per direzione.
 `--listen` cattura in promiscuità tutti i frame IPv4 con protocollo 253 e non
 mostra questi ICMP (protocollo 1). Per provare la consegna leggere il listener,
 non l'assenza di reply sul mittente. `--timeout` vale 5 secondi in ascolto e 1 in invio
-quando non è specificato. Nella procedura dello sprint sono riportati gli
+quando non è specificato. Nella procedura della pipeline sono riportati gli
 attacchi cross-tenant e i percorsi leaf/spine attesi.
 Per nuovi scenari basta aggiungere un nome a `CASES` e costruire il relativo
 pacchetto in `build_packet`.
@@ -197,15 +207,17 @@ sudo .venv/bin/python tests/network/flow_visualizer.py
 ```
 
 Scegli il numero o il nome dello switch. Il visualizzatore mostra un riepilogo
-per tabella/tipo di regola e i contatori delle singole regole. Non richiede nuove
-dipendenze e legge soltanto lo stato OVS.
+per tabella/tipo di regola, i contatori delle singole regole e i bucket dei gruppi
+dello switch scelto. Per ciascun bucket mostra peso, porta di uscita, pacchetti e
+byte prima/dopo, delta e percentuale dei pacchetti rispetto al delta del gruppo.
+Non richiede nuove dipendenze e legge soltanto lo stato OVS.
 
-- `b`: salva i contatori attuali come riferimento **prima del test**.
+- `b`: salva i contatori attuali di flow e bucket come riferimento **prima del test**.
 - Esegui il caso con `packet_io.py` nella CLI Mininet, poi `r` per aggiornare:
-  `Delta pkt` mostra gli incrementi rispetto al riferimento.
+  `Delta pkt` mostra gli incrementi rispetto al riferimento, anche per i bucket.
 - `a`: alterna tutte le regole e quelle con pacchetti.
 - Inserisci l'ID di una regola per vedere match, azioni e delta byte leggibili.
-- `s`: scegli un altro leaf/spine; `q`: esci.
+- `s`: scegli un altro leaf/spine e ricrea il riferimento; `q`: esci.
 
 Per aprire direttamente leaf1 o ottenere una singola schermata:
 
@@ -220,7 +232,43 @@ Puoi anche leggere un dump salvato (o il testo copiato dal terminale), senza sud
 .venv/bin/python tests/network/flow_visualizer.py --file /tmp/leaf1-flows.txt --active
 ```
 
+La modalità `--file` legge solo i flow, senza informazioni sui gruppi.
+Assenza di gruppi, errori di lettura e contatori azzerati sono indicati nella
+schermata. Con un riferimento invalido o delta totale nullo la percentuale dei
+bucket non viene calcolata.
+
 I contatori sono passaggi nelle regole: un pacchetto può essere contato in più
 tabelle. `ARP al controller` conta le richieste, non prova che il proxy abbia
 risposto; controlla anche l'output di `packet_io.py`. `reset` indica contatori
 diminuiti o regole reinstallate; `nuova` indica una regola assente nel riferimento.
+
+
+### Verifica manuale ECMP
+
+Il caso `ecmp-udp` invia più flussi UDP: cambia la porta sorgente da `40000` in
+poi e mantiene la porta destinazione `9000`. I valori predefiniti sono 100
+flussi e 10 pacchetti per flusso. Gli indirizzi restano configurabili con le
+opzioni già presenti; l'output riporta tuple e pacchetti effettivamente inviati.
+
+1. Nel visualizzatore scegliere `leaf1` e premere `b` per salvare il riferimento.
+2. Dalla CLI Mininet inviare il traffico autorizzato h2 → h6:
+
+   ```text
+   h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case ecmp-udp --flows 100 --packets-per-flow 10
+   ```
+
+3. Nel visualizzatore premere `r` e leggere i due bucket del gruppo `1`.
+   Entrambi devono avere un delta pacchetti positivo. Registrare contatori
+   prima/dopo, traffico offerto, percentuali osservate e versione OVS.
+
+Ripetere la stessa misura scegliendo `leaf2` per h6 → h10 e `leaf3` per h10 → h2;
+i comandi completi sono nella [procedura ECMP](docs/pipeline.md#verifica-manuale-ecmp).
+Un risultato diverso da 50/50 può essere corretto: i pesi sono uguali, ma la
+selezione dipende dall'hash e dalla configurazione OVS. Un solo ping non deve
+necessariamente attraversare entrambi gli spine.
+
+`--listen` continua a catturare soltanto IPv4 con protocollo 253: non è il
+listener per il traffico UDP di `ecmp-udp`. La distribuzione si verifica dai
+bucket, la consegna e l'isolamento con le prove IPv4/ARP precedenti. Non viene
+aggiunto `test_ecmp.py`; i test automatici esistenti verificano la configurazione
+e le regressioni. La tolleranza ai guasti degli uplink richiede un lavoro separato.

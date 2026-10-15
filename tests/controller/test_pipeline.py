@@ -4,13 +4,16 @@ from itertools import permutations
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 from ryu.lib.packet import arp, ethernet, packet
 from ryu.ofproto import ofproto_v1_3 as ofp, ofproto_v1_3_parser as parser
 
 from controller.arp_proxy import build_arp_reply
-from controller.pipeline import (ARP_COOKIE, BASE_COOKIE, TAG_DROP_COOKIE,
-                                 install_entry_tables)
+from controller.app import GoodFencesApp
+from controller.pipeline import (ARP_COOKIE, BASE_COOKIE, ECMP_GROUP_ID,
+                                 TAG_DROP_COOKIE, install_entry_tables,
+                                 prepare_pipeline)
 from network_models import HostModel, NetworkModel
 
 
@@ -18,15 +21,21 @@ def installed(model, dpid):
     messages = []
     datapath = SimpleNamespace(id=dpid, ofproto=ofp, ofproto_parser=parser,
                               send_msg=messages.append)
+    prepare_pipeline(datapath, model)
     install_entry_tables(datapath, model)
     for message in messages:
         message.serialize()
     assert messages[0].command == ofp.OFPFC_DELETE
-    return messages[1:]
+    flows = [message for message in messages[1:]
+             if isinstance(message, parser.OFPFlowMod)]
+    groups = {message.group_id: message for message in messages
+              if isinstance(message, parser.OFPGroupMod)
+              and message.command == ofp.OFPGC_ADD}
+    return flows, groups
 
 
-def traverse(flows, fields):
-    """Applica match/priorità e le sole azioni usate dalla pipeline al frame."""
+def traverse(flows, fields, groups=None, bucket_index=0):
+    """Verifica un percorso scelto esplicitamente, senza simulare l'hash OVS."""
     fields, table, outputs, visited = dict(fields), 0, [], []
     while table is not None:
         def matches(flow):
@@ -50,7 +59,15 @@ def traverse(flows, fields):
                 table = instruction.table_id
                 continue
             assert instruction.type == ofp.OFPIT_APPLY_ACTIONS
+            actions = []
             for action in instruction.actions:
+                if isinstance(action, parser.OFPActionGroup):
+                    group = groups[action.group_id]
+                    assert group.type == ofp.OFPGT_SELECT
+                    actions.extend(group.buckets[bucket_index].actions)
+                else:
+                    actions.append(action)
+            for action in actions:
                 if isinstance(action, parser.OFPActionPushVlan):
                     fields['vlan_vid'] = ofp.OFPVID_PRESENT
                 elif isinstance(action, parser.OFPActionSetField):
@@ -73,30 +90,38 @@ class PipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = NetworkModel(str(Path(__file__).resolve().parents[2] / 'config'))
-        cls.flows = {dpid: installed(cls.model, dpid)
+        pipelines = {dpid: installed(cls.model, dpid)
                      for dpid in (1, 2, 3, 101, 102)}
+        cls.flows = {dpid: values[0] for dpid, values in pipelines.items()}
+        cls.groups = {dpid: values[1] for dpid, values in pipelines.items()}
         cls.source, cls.destination = cls.model.tenants[1].hosts[:2]
 
     def test_all_same_tenant_interleaf_paths(self):
         for tenant in self.model.tenants:
             for source, destination in permutations(tenant.hosts, 2):
-                with self.subTest(source=source.name, destination=destination.name):
-                    source_leaf = (source.host_id - 1) // self.model.hosts_per_leaf + 1
-                    target_leaf = (destination.host_id - 1) // self.model.hosts_per_leaf + 1
-                    outputs, _ = traverse(self.flows[source_leaf], ipv4(source, destination))
-                    uplink, tagged = outputs[0]
-                    self.assertEqual((len(outputs), uplink, tagged['vlan_vid']),
-                                     (1, 5, ofp.OFPVID_PRESENT | tenant.tag))
-                    outputs, _ = traverse(self.flows[101], dict(tagged, in_port=source_leaf))
-                    self.assertEqual((len(outputs), outputs[0][0]), (1, target_leaf))
-                    outputs, _ = traverse(self.flows[target_leaf], dict(outputs[0][1], in_port=5))
-                    self.assertEqual((len(outputs), outputs[0][0], outputs[0][1]['vlan_vid']),
-                                     (1, destination.port, ofp.OFPVID_NONE))
+                for bucket_index, uplink in enumerate(self.model.get_leaf_uplink_ports()):
+                    self.check_interleaf_path(tenant, source, destination, bucket_index, uplink)
+
+    def check_interleaf_path(self, tenant, source, destination, bucket_index, uplink):
+        with self.subTest(source=source.name, destination=destination.name, uplink=uplink):
+            source_leaf = (source.host_id - 1) // self.model.hosts_per_leaf + 1
+            target_leaf = (destination.host_id - 1) // self.model.hosts_per_leaf + 1
+            outputs, _ = traverse(self.flows[source_leaf], ipv4(source, destination),
+                                  self.groups[source_leaf], bucket_index)
+            selected_port, tagged = outputs[0]
+            self.assertEqual((len(outputs), selected_port, tagged['vlan_vid']),
+                             (1, uplink, ofp.OFPVID_PRESENT | tenant.tag))
+            spine_id = 101 + bucket_index
+            outputs, _ = traverse(self.flows[spine_id], dict(tagged, in_port=source_leaf))
+            self.assertEqual((len(outputs), outputs[0][0]), (1, target_leaf))
+            outputs, _ = traverse(self.flows[target_leaf], dict(outputs[0][1], in_port=uplink))
+            self.assertEqual((len(outputs), outputs[0][0], outputs[0][1]['vlan_vid']),
+                             (1, destination.port, ofp.OFPVID_NONE))
 
     def test_same_leaf_delivery_in_both_directions(self):
         model = deepcopy(self.model)
         model.tenants[0].hosts[2] = HostModel(name='h4', leaf='leaf1', port=4, ip='10.0.0.3')
-        flows = installed(model, 1)
+        flows, _ = installed(model, 1)
         for source, destination in permutations((model.tenants[0].hosts[0],
                                                 model.tenants[0].hosts[2]), 2):
             outputs, _ = traverse(flows, ipv4(source, destination))
@@ -126,19 +151,98 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(outputs, [])
                 self.assertEqual(visited[-1], (1, BASE_COOKIE))
 
-    def test_fabric_return_paths_and_unused_uplink_are_dropped(self):
+    def test_fabric_return_paths_are_dropped_on_both_paths(self):
         tagged = dict(ipv4(self.source, self.destination), vlan_vid=ofp.OFPVID_PRESENT | 102)
         for dpid, changes, drop_table in ((1, dict(in_port=5), 2),
-                                         (1, dict(in_port=6), 0),
+                                         (1, dict(in_port=6), 2),
+                                         (1, dict(in_port=7), 0),
                                          (101, dict(in_port=2), 0),
                                          (101, dict(in_port=99), 0),
                                          (101, dict(in_port=1, vlan_vid=ofp.OFPVID_PRESENT | 101), 0),
-                                         (102, dict(in_port=1), 0)):
+                                         (102, dict(in_port=2), 0),
+                                         (102, dict(in_port=99), 0),
+                                         (102, dict(in_port=1, vlan_vid=ofp.OFPVID_PRESENT | 101), 0)):
             with self.subTest(dpid=dpid, changes=changes):
                 outputs, visited = traverse(self.flows[dpid], dict(tagged, **changes))
                 self.assertEqual(outputs, [])
                 self.assertEqual(visited[-1], (drop_table, BASE_COOKIE))
-        self.assertEqual(len(self.flows[102]), 1)
+
+    def test_select_groups_have_equal_weights_and_no_failover_watches(self):
+        for dpid, groups in self.groups.items():
+            if self.model.is_spine(dpid):
+                self.assertEqual(groups, {})
+                continue
+            self.assertEqual(set(groups), {ECMP_GROUP_ID})
+            group = groups[ECMP_GROUP_ID]
+            self.assertEqual(group.type, ofp.OFPGT_SELECT)
+            self.assertEqual([bucket.weight for bucket in group.buckets], [1, 1])
+            for bucket in group.buckets:
+                self.assertEqual((bucket.watch_port, bucket.watch_group),
+                                 (ofp.OFPP_ANY, ofp.OFPG_ANY))
+
+    def start_controller_installation(self):
+        """Crea solo lo stato necessario agli handler, senza avviare Ryu."""
+        app = GoodFencesApp.__new__(GoodFencesApp)
+        app.model = self.model
+        app.datapaths, app.pending, app.ready = {}, {}, set()
+        app.expected_dpids, app.logger = {1}, Mock()
+        messages = []
+        dp = SimpleNamespace(id=1, ofproto=ofp, ofproto_parser=parser,
+                             send_msg=messages.append, close=Mock())
+        dp.set_xid = lambda message: setattr(message, 'xid', len(messages) + 1)
+        features = SimpleNamespace(msg=SimpleNamespace(datapath=dp, n_tables=3))
+        with patch('controller.app.hub.spawn_after'):
+            app.switch_features_handler(features)
+        return app, dp, messages
+
+    def acknowledge_barrier(self, app, dp, xid):
+        event = SimpleNamespace(msg=SimpleNamespace(datapath=dp, xid=xid))
+        with patch('controller.app.hub.spawn_after'):
+            app.barrier_reply_handler(event)
+
+    def test_group_barrier_precedes_permissive_flows_and_ready(self):
+        app, dp, messages = self.start_controller_installation()
+        group_xid = messages[-1].xid
+        self.assertEqual(app.ready, set())
+        self.assertTrue(all(message.priority == 0 for message in messages
+                            if isinstance(message, parser.OFPFlowMod)
+                            and message.command == ofp.OFPFC_ADD))
+        group_commands = [message.command for message in messages
+                          if isinstance(message, parser.OFPGroupMod)]
+        self.assertEqual(group_commands, [ofp.OFPGC_DELETE, ofp.OFPGC_ADD])
+        self.acknowledge_barrier(app, dp, group_xid)
+        self.assertTrue(any(message.priority > 0 for message in messages
+                            if isinstance(message, parser.OFPFlowMod)))
+        self.assertEqual(app.ready, set())
+        # La scadenza della prima fase non deve interrompere la seconda.
+        app._installation_timeout(dp, group_xid, 'groups')
+        dp.close.assert_not_called()
+        self.acknowledge_barrier(app, dp, group_xid)  # Reply duplicata, da ignorare.
+        self.acknowledge_barrier(app, dp, messages[-1].xid)
+        self.assertEqual(app.ready, {1})
+        self.assertEqual(app.pending, {})
+
+    def test_switch_errors_and_timeouts_prevent_ready_in_both_phases(self):
+        for phase in ('groups', 'flows'):
+            for failure in ('error', 'timeout'):
+                with self.subTest(phase=phase, failure=failure):
+                    app, dp, messages = self.start_controller_installation()
+                    if phase == 'flows':
+                        self.acknowledge_barrier(app, dp, messages[-1].xid)
+                    xid = messages[-1].xid
+                    if failure == 'error':
+                        event = SimpleNamespace(msg=SimpleNamespace(
+                            datapath=dp, xid=xid, type=6, code=1, data=b''))
+                        app.error_handler(event)
+                        app.logger.error.assert_called_once()
+                    else:
+                        app._installation_timeout(dp, xid, phase)
+                    message_count = len(messages)
+                    self.acknowledge_barrier(app, dp, xid)
+                    self.assertEqual(len(messages), message_count)
+                    self.assertEqual(app.ready, set())
+                    self.assertEqual(app.pending, {})
+                    dp.close.assert_called_once()
 
     def test_arp_proxy_preserves_overlapping_tenants(self):
         access, tenants = self.model.get_arp_bindings()

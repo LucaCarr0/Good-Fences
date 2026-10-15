@@ -1,4 +1,4 @@
-# Sprint 1.3: forwarding unicast isolato per tenant
+# Forwarding unicast isolato per tenant con ECMP
 
 ## Politica e percorso
 
@@ -19,18 +19,37 @@ IPv4 dalle porte host richiede porta, MAC e IP sorgente configurati e assenza di
 VLAN. La tabella 0 applica il tag del modello e passa alla 1. Questa ammette
 solo la coppia MAC/IP di destinazione configurata nel tenant della VLAN, poi
 passa alla 2. La tabella 2 toglie il tag e consegna a un host locale, oppure
-inoltra dall'host assegnato dello stesso tenant sul primo uplink. Un pacchetto
-arrivato dalla fabric può soltanto essere consegnato localmente: non ha un
-percorso uplink → uplink.
+inoltra dall'host assegnato dello stesso tenant tramite il gruppo ECMP. Un
+pacchetto arrivato dalla fabric può soltanto essere consegnato localmente:
+non ha un percorso uplink → uplink.
 
-Il primo uplink, `hosts_per_leaf + 1` (porta 5), collega ogni leaf a spine1
-(DPID 101). Solo su questo ingresso si ammettono IPv4 con VLAN nota.
-Spine1 controlla VLAN e MAC/IP di destinazione e inoltra verso il leaf
-configurato, preservando il tag e ammettendo soltanto ingressi dagli altri leaf.
-Spine2 e gli altri uplink rimangono in DROP. Il percorso remoto è quindi
-host → leaf sorgente → spine1 → leaf destinazione → host, senza flooding,
-apprendimento dinamico o possibilità di ritorno sul medesimo link.
-IPv6 e gli altri protocolli non hanno regole permissive.
+Ogni leaf ha il proprio gruppo OpenFlow SELECT con ID `1`. Nella configurazione
+attuale contiene due bucket con peso `1`: porta 5 verso spine1 (DPID 101) e
+porta 6 verso spine2 (DPID 102). Le porte sono ricavate dal modello. SELECT
+sceglie un solo bucket per pacchetto; non duplica il traffico. La selezione
+predefinita di OVS può mantenere uno stesso flusso sul medesimo percorso: pesi
+uguali non impongono una divisione esatta 50/50 su una misura finita.
+
+Entrambi gli uplink ammettono IPv4 con VLAN nota. Entrambi gli spine controllano
+VLAN e MAC/IP di destinazione e inoltrano verso il leaf configurato, preservando
+il tag e ammettendo soltanto ingressi dagli altri leaf. Il percorso remoto è
+host → leaf sorgente → uno degli spine → leaf destinazione → host, senza
+flooding, apprendimento dinamico o ritorno sul medesimo link. IPv6 e gli altri
+protocolli non hanno regole permissive. La gestione dei guasti degli uplink non
+è inclusa: un gruppo SELECT da solo non ne dimostra la tolleranza.
+
+```mermaid
+flowchart LR
+    H2["h2 · tenant B"] --> L1["leaf1 · gruppo SELECT 1"]
+    L1 -->|"bucket 0 · peso 1 · porta 5"| S1[spine1]
+    L1 -->|"bucket 1 · peso 1 · porta 6"| S2[spine2]
+    S1 -->|"VLAN 102"| L2[leaf2]
+    S2 -->|"VLAN 102"| L2
+    L2 -->|"pop VLAN · porta 2"| H6["h6 · tenant B"]
+```
+
+I due rami rappresentano percorsi alternativi. Il modello collega allo stesso
+modo tutti e tre i leaf a entrambi gli spine.
 
 | Switch/tabella | Priorità | Match | Istruzioni |
 | --- | ---: | --- | --- |
@@ -39,13 +58,13 @@ IPv6 e gli altri protocolli non hanno regole permissive.
 | Leaf/0 | 350 | Porta assegnata, ARP untagged, SPA zero oppure TPA uguale all'IP configurato | DROP |
 | Leaf/0 | 300 | ARP request untagged, porta e sorgenti Ethernet/ARP del binding | Controller, frame completo |
 | Leaf/0 | 200 | IPv4 untagged, porta/MAC/IP sorgenti del binding | APPLY push VLAN 0x8100, set VLAN tenant; goto 1 |
-| Leaf/0 | 200 | Primo uplink, IPv4, VLAN nota | goto 1 |
+| Leaf/0 | 200 | Ciascun uplink, IPv4, VLAN nota | goto 1 |
 | Leaf/1 | 300 | ARP | DROP |
 | Leaf/1 | 200 | IPv4, VLAN tenant, MAC/IP di una destinazione del tenant | goto 2 |
 | Leaf/2 | 200 | VLAN tenant, MAC di destinazione locale | APPLY pop VLAN, output porta host |
-| Leaf/2 | 200 | Porta host assegnata nel tenant, VLAN tenant, MAC di destinazione remota | APPLY output primo uplink |
+| Leaf/2 | 200 | Porta host assegnata nel tenant, VLAN tenant, MAC di destinazione remota | APPLY group 1 (SELECT, output 5 oppure 6) |
 | Leaf/0,1,2 | 0 | Table-miss | DROP |
-| Spine1/0 | 200 | Porta di un leaf diverso dalla destinazione, IPv4, VLAN tenant, MAC/IP di destinazione | APPLY output leaf destinazione |
+| Spine1,2/0 | 200 | Porta di un leaf diverso dalla destinazione, IPv4, VLAN tenant, MAC/IP di destinazione | APPLY output leaf destinazione |
 | Spine1,2/0 | 0 | Table-miss | DROP |
 
 Non ci sono DROP per porta a priorità 100: spare, ingressi sconosciuti e sorgenti
@@ -55,13 +74,19 @@ bloccati dal tag esterno oppure dall'EtherType residuo.
 Cookie per leggere i contatori: `0x47460010` default DROP, `0x47460020` VLAN DROP,
 `0x47460021` ARP DROP, `0x47460030` ARP controller, `0x47460040` IPv4 host,
 `0x47460041` IPv4 uplink, `0x47460042` destinazione ammessa in tabella 1,
-`0x47460050` consegna locale, `0x47460051` uscita sul primo uplink,
-`0x47460052` forwarding spine1.
+`0x47460050` consegna locale, `0x47460051` uscita tramite gruppo ECMP,
+`0x47460052` forwarding di entrambi gli spine.
 
-`install_base_pipeline` pulisce e installa soltanto i default DROP;
-`install_entry_tables` aggiunge la politica corrente. L'app chiama il secondo.
-La Barrier segue tutta l'installazione; timeout/errori impediscono ready.
-Non sono introdotti ECMP, meter, gruppi, REST o provisioning dinamico.
+La funzione di supporto ECMP resta in `src/controller/pipeline.py`, senza un
+modulo aggiuntivo. All'avvio e alla riconnessione si rimuovono i vecchi flow,
+si ripristinano i default DROP e si elimina/ricrea soltanto il gruppo ECMP del
+leaf. La prima Barrier conferma questa preparazione prima dell'installazione
+dei flow che richiamano il gruppo. Una seconda Barrier conferma la pipeline
+completa e abilita READY del leaf. Gli spine preparano i DROP e i flow senza
+creare gruppi e attendono la sola Barrier finale. Errori OpenFlow e timeout
+vengono registrati e impediscono
+READY; un errore del gruppo non consente di proseguire con i flow dipendenti.
+Non sono introdotti meter, REST o provisioning dinamico.
 
 ## Avvio e ispezione manuale
 
@@ -86,16 +111,25 @@ sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=0
 sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=1
 sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=2
 sudo ovs-ofctl -O OpenFlow13 dump-flows spine1
+sudo ovs-ofctl -O OpenFlow13 dump-groups leaf1
+sudo ovs-ofctl -O OpenFlow13 dump-group-stats leaf1
 ```
 
-Ripetere per leaf2/leaf3 e spine2. Sono attesi output dati solo sulle porte host,
-sul primo uplink dei leaf e sulle porte leaf di spine1. Spine2 ha solo il miss.
-Non devono esserci NORMAL, FLOOD, group o meter. ARP esce solo verso il controller.
+Ripetere per leaf2/leaf3 e spine2. Sono attesi output dati sulle porte host,
+sui bucket verso entrambi gli uplink dei leaf e sulle porte leaf di entrambi gli
+spine. Ogni leaf ha un gruppo SELECT `1`, con bucket di peso uguale e output 5/6;
+gli spine non richiedono gruppi. Non devono esserci NORMAL, FLOOD o meter.
+ARP esce solo verso il controller.
 
 Per leggere gli stessi contatori in tabelle interattive, avviare da un terminale
 Linux `sudo .venv/bin/python tests/network/flow_visualizer.py` e scegliere il
 leaf/spine. Premere `b` prima di un test, poi `r` dopo l'invio per vedere gli
-incrementi; l'ID di una regola apre match e azioni leggibili. Le istruzioni
+incrementi dei flow e dei bucket. Per i bucket sono mostrati peso, porta,
+pacchetti/byte prima e dopo, delta e percentuale dei pacchetti del gruppo.
+L'ID di una regola apre match e azioni leggibili. Cambiando switch il riferimento
+viene ricreato; contatori azzerati o errori di lettura invalidano la relativa
+misura. Non si calcolano percentuali senza un riferimento valido o con delta
+totale nullo. La modalità `--file` resta limitata ai flow. Le istruzioni
 complete sono nel [README](../README.md#visualizzatore-dei-contatori-leafspine).
 
 ## Utility per i pacchetti dei test manuali
@@ -117,9 +151,9 @@ h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case ipv4-tagge
 h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case ipv4-untagged
 ```
 
-Ogni comando con `--case` invia **un solo frame** e ne mostra MAC, IP,
-operazione e VLAN. Per ARP/RARP attende un secondo e stampa le eventuali
-risposte numerate, oppure `Nessuna risposta ricevuta entro 1 secondo.`.
+Questi casi inviano **un solo frame** e ne mostrano MAC, IP, operazione e VLAN.
+Il nuovo caso `ecmp-udp`, descritto più avanti, invia invece più flussi UDP.
+Per ARP/RARP l'utility attende un secondo e stampa le eventuali risposte numerate, oppure `Nessuna risposta ricevuta entro 1 secondo.`.
 Per IPv4 la consegna si verifica con il listener sul destinatario.
 I valori predefiniti sono quelli di h2 verso h6: MAC `00:00:00:00:00:02`, IP
 `10.0.0.1`, destinazione `10.0.0.2` / `00:00:00:00:00:06`, VLAN 102.
@@ -139,7 +173,7 @@ sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
 | `gratuitous-arp` | ARP Request broadcast, SPA = TPA = `10.0.0.1` | DROP tabella 0, priorità 350, cookie `0x47460021` |
 | `rarp` | EtherType `0x8035`, opcode 3 | Table-miss tabella 0, cookie `0x47460010` |
 | `ipv4-tagged` | IPv4 valido con VLAN 102 già presente | DROP tabella 0, priorità 400, cookie `0x47460020` |
-| `ipv4-untagged` | IPv4 con MAC/IP di h2, senza VLAN, verso h6 | Leaf1: `0x47460040`, `0x47460042`, `0x47460051`; spine1: `0x47460052`; leaf2: `0x47460041`, `0x47460042`, `0x47460050`; h6 riceve untagged |
+| `ipv4-untagged` | IPv4 con MAC/IP di h2, senza VLAN, verso h6 | Leaf1: `0x47460040`, `0x47460042`, `0x47460051`; spine scelto: `0x47460052`; leaf2: `0x47460041`, `0x47460042`, `0x47460050`; h6 riceve untagged |
 
 Per i cinque casi successivi ad `arp-request` sono attese zero risposte ARP/RARP.
 IPv4 usa il protocollo sperimentale 253 e non richiede una reply: per la consegna
@@ -189,8 +223,9 @@ Inviare soltanto dopo aver letto `Cattura pronta` in entrambi i log. Al termine
 della finestra rileggere i log con gli stessi `cat`: h6 deve mostrare un frame
 untagged, sorgente h2 (`...:02`, `10.0.0.1`), destinazione h6 (`...:06`,
 `10.0.0.2`); h5 deve riportare zero frame. Leggere anche i contatori del percorso
-leaf1 → spine1 → leaf2. Sul link leaf1-eth5 il frame deve avere VLAN 102;
-su leaf1-eth6 e spine2 non deve comparire il frame.
+leaf1 → spine scelto → leaf2. Il frame attraversa uno degli uplink leaf1-eth5
+o leaf1-eth6 con VLAN 102; il gruppo sceglie un solo bucket per pacchetto.
+Per verificare l'uso di entrambi i percorsi serve la prova ECMP con tuple diverse.
 
 Per ogni attacco avviare una nuova finestra di cattura e salvare un nuovo
 riferimento dei contatori prima dell'invio. Con IP sovrapposti specificare
@@ -246,8 +281,9 @@ Dal terminale Linux:
 sudo ovs-appctl ofproto/trace leaf1 'in_port=2,dl_src=00:00:00:00:00:02,dl_dst=00:00:00:00:00:06,dl_type=0x0800,nw_src=10.0.0.1,nw_dst=10.0.0.2'
 ```
 
-Atteso: flow host a priorità 200, push VLAN 102, tabella 1, tabella 2, output 5.
-Il trace simula il percorso e non incrementa i contatori dei pacchetti reali.
+Atteso: flow host a priorità 200, push VLAN 102, tabella 1, tabella 2, group 1
+e selezione di un bucket verso porta 5 oppure 6. Il trace simula il percorso e
+non incrementa i contatori dei pacchetti reali.
 Ripetere cambiando un solo campo per volta:
 
 | Variazione del comando | Risultato atteso |
@@ -257,10 +293,10 @@ Ripetere cambiando un solo campo per volta:
 | `in_port=4` | Spare: table-miss di tabella 0 |
 | `in_port=LOCAL` | Ingresso non ammesso: table-miss di tabella 0 |
 | Aggiungere `dl_vlan=101`, poi 102, poi 0 | DROP tagged a priorità 400 |
-| `in_port=5`, aggiungere `dl_vlan=102` | Ammissione uplink, tabella 1, DROP in 2: h6 non è locale, nessun ritorno verso spine1 |
-| `in_port=6`, aggiungere `dl_vlan=102` | Secondo uplink inattivo: table-miss di tabella 0 |
-| `in_port=5`, senza VLAN | Table-miss di tabella 0 |
-| `in_port=5`, aggiungere `dl_vlan=999` | Table-miss di tabella 0 |
+| `in_port=5`, aggiungere `dl_vlan=102` | Ammissione uplink, tabella 1, DROP in 2: h6 non è locale, nessun percorso uplink → uplink |
+| `in_port=6`, aggiungere `dl_vlan=102` | Stessa ammissione della porta 5, poi DROP in 2: h6 non è locale |
+| `in_port=5` oppure `6`, senza VLAN | Table-miss di tabella 0 |
+| `in_port=5` oppure `6`, aggiungere `dl_vlan=999` | Table-miss di tabella 0 |
 
 Per la consegna dalla fabric e per il percorso sullo spine:
 
@@ -272,8 +308,9 @@ sudo ovs-appctl ofproto/trace spine1 'in_port=1,dl_vlan=102,dl_src=00:00:00:00:0
 Atteso: leaf2 fa pop VLAN e output 2; spine1 mantiene VLAN 102 e fa output 2.
 Sul trace spine1, cambiare `in_port=1` in 2: miss, perché è già il leaf di
 destinazione. Anche porta 4, VLAN 101 con MAC della vittima h6 `...:06`, oppure
-IP `.13` con MAC h6 producono miss. Lo stesso trace su spine2 produce miss.
-Questi casi verificano che non si ritorni sul link di ingresso e che MAC/IP
+IP `.13` con MAC h6 producono miss. Lo stesso trace su spine2 deve avere
+lo stesso risultato di spine1. Sul trace di leaf2 ripetere `in_port=6`: deve
+consegnare ancora a h6 senza VLAN. Questi casi verificano che non si ritorni sul link di ingresso e che MAC/IP
 non possano scegliere un host di un altro tenant.
 
 Per ARP dagli uplink:
@@ -282,7 +319,7 @@ Per ARP dagli uplink:
 sudo ovs-appctl ofproto/trace leaf1 'in_port=5,dl_vlan=102,dl_type=0x0806,arp_op=1,arp_spa=10.0.0.1,arp_tpa=10.0.0.2,arp_sha=00:00:00:00:00:02,arp_tha=00:00:00:00:00:00'
 ```
 
-Atteso: DROP in tabella 0; nessun output controller.
+Atteso: DROP in tabella 0; nessun output controller. Ripetere con `in_port=6`.
 
 ## Pacchetti reali e contatori dalla CLI Mininet
 
@@ -296,7 +333,8 @@ h2 ip neigh show 10.0.0.2
 
 ARP risolve il MAC `00:00:00:00:00:06`; i dati incrementano il flow host di porta 2,
 la destinazione h6/VLAN 102 in tabella 1 e l'output uplink in tabella 2.
-Spine1 inoltra verso leaf2, che consegna a h6 senza VLAN. Il ping deve riuscire.
+Lo spine selezionato inoltra verso leaf2, che consegna a h6 senza VLAN. Il ping
+deve riuscire; un solo ping non deve necessariamente usare entrambi gli spine.
 
 Per inviare un singolo frame esatto senza installare altre librerie, incollare
 questo comando nella CLI Mininet. Usa solo Python standard e il socket del namespace h2:
@@ -322,6 +360,62 @@ o `9100`. MAC/IP falsi incrementano il table-miss in tabella 0; i tagged un DROP
 con cookie `0x47460020`. Il flow host legittimo non deve incrementare.
 Per spare, eseguire il comando da h4 cambiando anche il bind in `h4-eth0`:
 il frame untagged termina nel table-miss. Ripetere da h8 e h12 sui rispettivi leaf.
+
+## Verifica manuale ECMP
+
+La prova usa OpenFlow 1.3 e il metodo SELECT predefinito della versione OVS
+installata. Il caso `ecmp-udp` varia la porta sorgente UDP da `40000` in poi,
+con porta destinazione `9000`. `--flows` e `--packets-per-flow` devono essere
+positivi; l'intervallo delle porte sorgenti deve rientrare in `1..65535`.
+I valori predefiniti sono 100 flussi e 10 pacchetti per flusso, quindi 1.000
+pacchetti offerti. IP e MAC sono configurabili come negli altri casi.
+L'output riporta gli indirizzi, le porte e i pacchetti effettivamente inviati.
+
+Fermare altri invii durante la misura. Dal terminale Linux annotare la versione
+OVS e aprire il visualizzatore su leaf1:
+
+```bash
+ovs-vswitchd --version
+sudo .venv/bin/python tests/network/flow_visualizer.py --switch leaf1
+```
+
+Premere `b` prima dell'invio. Dalla CLI Mininet eseguire:
+
+```text
+h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case ecmp-udp --flows 100 --packets-per-flow 10
+```
+
+Premere `r` nel visualizzatore e registrare i contatori del gruppo `1`.
+Il criterio è un **delta pacchetti positivo per entrambi i bucket**. La percentuale
+osservata del bucket è `100 × delta pacchetti bucket / somma delta pacchetti dei
+bucket`: non è richiesta una divisione esatta 50/50. Un singolo ping non è una
+prova del bilanciamento.
+
+Ripetere la misura salvando un nuovo riferimento per ciascun leaf: scegliere
+`leaf2` per h6 → h10 e `leaf3` per h10 → h2, poi inviare rispettivamente:
+
+```text
+h6 .venv/bin/python tests/network/packet_io.py --iface h6-eth0 --case ecmp-udp --mac 00:00:00:00:00:06 --ip 10.0.0.2 --target-mac 00:00:00:00:00:0a --target-ip 10.0.0.13 --flows 100 --packets-per-flow 10
+h10 .venv/bin/python tests/network/packet_io.py --iface h10-eth0 --case ecmp-udp --mac 00:00:00:00:00:0a --ip 10.0.0.13 --target-mac 00:00:00:00:00:02 --target-ip 10.0.0.1 --flows 100 --packets-per-flow 10
+```
+
+Per ogni misura conservare l'output di invio e compilare una riga per bucket:
+
+| Switch / versione OVS | Traffico offerto e inviato | Bucket / porta | Pkt prima / dopo / delta | Byte prima / dopo / delta | Percentuale pacchetti |
+| --- | --- | --- | --- | --- | --- |
+| Da rilevare | Tuple, flussi e pacchetti da rilevare | Da rilevare | Da rilevare | Da rilevare | Da calcolare sui delta |
+
+Se i contatori diminuiscono o il gruppo viene reinstallato, ripartire con `b`:
+la misura precedente non è valida. In caso di delta nullo su un bucket registrare
+il risultato, controllare errori dello switch, regole e configurazione/versione
+OVS; il criterio ECMP non è ancora dimostrato. Non sostituire i dati mancanti con
+uno split teorico.
+
+`--listen` continua a catturare esclusivamente protocollo IP 253 e non il caso
+UDP `ecmp-udp`. I bucket dimostrano la distribuzione; per consegna, isolamento,
+overlap, proxy ARP e spoofing ripetere le prove precedenti e quelle seguenti.
+Per entrambi i percorsi usare i trace sui due spine e sugli ingressi 5/6 dei
+leaf. Nessun test di guasto o failover è incluso in questa verifica.
 
 ## Regressioni ARP e catture manuali
 
@@ -391,24 +485,42 @@ dei cinque nuovi test richiesti.
 
 Fermare con Ctrl-C soltanto il controller e riavviare `bash scripts/start-controller.sh`.
 Lasciare la rete attiva. Attendere nuovamente `ALL SWITCHES READY: 5/5`, controllare
-l'assenza di errori OpenFlow, rileggere i flow e ripetere ARP, consegna IPv4,
-isolamento con MAC della vittima, spoofing e tagged.
-I contatori ripartono dopo la reinstallazione e le vecchie eccezioni ARP non devono
-restare. Registrare separatamente ciò che è stato osservato: queste procedure
+l'assenza di errori OpenFlow e rileggere flow, gruppi e bucket. Ogni leaf deve
+avere un solo gruppo ECMP `1` con i due bucket corretti, prima dei flow che lo
+referenziano. Ripetere ARP, consegna IPv4, isolamento con MAC della vittima,
+spoofing, tagged e la prova ECMP su ciascun leaf.
+I contatori ripartono dopo la reinstallazione: salvare nuovi riferimenti con `b`.
+Le vecchie eccezioni ARP non devono restare. Registrare separatamente ciò che è
+stato osservato: queste procedure
 descrivono risultati attesi e non attestano un'esecuzione live dei test.
 
-## Verifiche eseguite
+## Verifiche automatiche ECMP
 
-I 17 test locali di pipeline e utility passano. La pipeline usa il parser Ryu
-reale e serializza le regole per tutti i cinque DPID; verifica anche la consegna
-sullo stesso leaf con due host dello stesso tenant, usando un modello in memoria.
-Per ripeterli dalla radice:
+Il 15 ottobre 2026 sono passati 38 test: 9 sulla pipeline e sul ciclo di
+installazione del controller, 22 sul visualizzatore e 7 sull'utility pacchetti.
+Le verifiche coprono entrambi i percorsi, le regressioni di isolamento e ARP,
+l'ordine gruppi/flow, errori e timeout nelle due fasi, parsing dei bucket e
+generazione di tuple UDP diverse. Non è stato aggiunto `test_ecmp.py`.
+
+Per ripeterli:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests/controller -v
 .venv/bin/python -B -m unittest discover -s tests/network -v
 ```
 
+La distribuzione effettiva su OVS e le regressioni sulla rete restano da
+verificare manualmente con la procedura precedente.
+
+## Verifiche storiche dello sprint 1.3
+
+I risultati seguenti si riferiscono alla pipeline precedente, con solo spine1
+attivo; non attestano un'esecuzione o il bilanciamento ECMP della versione attuale.
+
+Nello sprint 1.3 passavano i 17 test locali di pipeline e utility. Le prove
+usavano il parser Ryu reale e serializzavano le regole per tutti i cinque DPID;
+verificavano anche la consegna sullo stesso leaf con due host dello stesso tenant,
+usando un modello in memoria.
 Il 14 ottobre 2026 è stata eseguita anche una verifica su Mininet/OVS con una
 rete temporanea e controller separato. Sono riusciti i ping h1→h5/h9,
 h2→h6/h10 e h3→h7/h11; h1→h10 è rimasto senza risoluzione ARP.
@@ -417,6 +529,7 @@ Le catture su h5/h6 non hanno ricevuto frame negli attacchi h1→h6
 (MAC vittima `00:00:00:00:00:06`) e h2→h5 (MAC vittima
 `00:00:00:00:00:05`), né con IP/MAC destinazione incoerenti, sorgenti
 falsificate, VLAN dalla porta host o invio dalla porta spare.
-I trace hanno confermato DROP per uplink→uplink, secondo uplink, ritorno
-sullo spine verso il leaf di ingresso e spine2. Tutti i cinque switch erano
-ready, senza errori OpenFlow; rete e controller temporanei sono stati fermati.
+Allora i trace hanno confermato DROP per uplink→uplink, secondo uplink, ritorno
+sullo spine verso il leaf di ingresso e spine2. Oggi secondo uplink e spine2
+sono attivi: quei due DROP non sono più risultati attesi. Tutti i cinque switch
+erano ready, senza errori OpenFlow; rete e controller temporanei sono stati fermati.

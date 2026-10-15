@@ -1,4 +1,6 @@
-"""Tabelle interattive dei contatori OpenFlow per leaf e spine (sola lettura)."""
+"""Tabelle interattive di flow e bucket OpenFlow per leaf e spine (sola lettura)."""
+from __future__ import annotations
+
 import argparse
 from collections import defaultdict
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ CATEGORIES = {
     0x47460041: 'IPv4 da uplink',
     0x47460042: 'IPv4 destinazione validata',
     0x47460050: 'IPv4 consegna host',
-    0x47460051: 'IPv4 uplink singolo',
+    0x47460051: 'IPv4 remoto / ECMP',
     0x47460052: 'IPv4 forwarding spine',
 }
 METADATA = {'cookie', 'duration', 'table', 'n_packets', 'n_bytes',
@@ -52,6 +54,35 @@ class Flow:
         return CATEGORIES.get(self.cookie, f'Cookie {hex(self.cookie)}')
 
 
+@dataclass(frozen=True)
+class Bucket:
+    weight: int
+    actions: str
+    packets: int | None = None
+    byte_count: int | None = None
+
+
+@dataclass(frozen=True)
+class Group:
+    group_id: int
+    kind: str
+    buckets: tuple[Bucket, ...]
+    duration: float | None = None
+    packets: int | None = None
+    byte_count: int | None = None
+
+    @property
+    def definition(self):
+        # In OpenFlow 1.3 i contatori identificano i bucket per posizione.
+        return self.kind, tuple((bucket.weight, bucket.actions) for bucket in self.buckets)
+
+
+@dataclass(frozen=True)
+class GroupSnapshot:
+    groups: tuple[Group, ...] = ()
+    error: str | None = None
+
+
 def parse_dump(dump):
     flows = []
     for line in dump.splitlines():
@@ -74,6 +105,83 @@ def parse_dump(dump):
     return sorted(flows, key=lambda f: (f.table, -f.priority, f.match))
 
 
+def parse_groups(dump):
+    groups = []
+    for line in dump.splitlines():
+        if not re.search(r'\bgroup_id=', line):
+            continue
+        try:
+            header, *descriptions = re.split(r',\s*bucket=', line.strip())
+            fields = dict(token.strip().split('=', 1)
+                          for token in header.split(',') if '=' in token)
+            buckets = []
+            for description in descriptions:
+                settings, actions = description.split('actions=', 1)
+                weight = re.search(r'(?:^|,)\s*weight[:=](\d+)', settings)
+                buckets.append(Bucket(int(weight[1]) if weight else 1, actions.strip()))
+            groups.append(Group(int(fields['group_id'], 0), fields['type'], tuple(buckets)))
+        except (KeyError, ValueError) as error:
+            raise ValueError(f'Descrizione gruppo non valida: {line.strip()}') from error
+    if not groups and 'OFPST_GROUP_DESC' not in dump:
+        raise ValueError('Il dump non contiene descrizioni dei gruppi OpenFlow.')
+    if len({group.group_id for group in groups}) != len(groups):
+        raise ValueError('Il dump contiene ID di gruppo duplicati.')
+    return sorted(groups, key=lambda group: group.group_id)
+
+
+def parse_counter(value):
+    # OVS usa "?" quando lo switch non offre un contatore.
+    if value in (None, '?', 'unknown', '-1', str(2**64 - 1)):
+        return None
+    counter = int(value)
+    if counter < 0:
+        raise ValueError('Contatore negativo.')
+    return counter
+
+
+def counter_fields(fields):
+    values = dict(token.strip().split('=', 1)
+                  for token in fields.split(',') if '=' in token)
+    return parse_counter(values.get('packet_count')), parse_counter(values.get('byte_count'))
+
+
+def parse_group_stats(dump, groups):
+    """Associa i bucket dei contatori alle descrizioni, nello stesso ordine OF1.3."""
+    statistics = {}
+    for line in dump.splitlines():
+        if not re.search(r'\bgroup_id=', line):
+            continue
+        try:
+            header, *bucket_fields = re.split(r',\s*bucket(\d+):', line.strip())
+            values = dict(token.strip().split('=', 1)
+                          for token in header.split(',') if '=' in token)
+            group_id = int(values['group_id'], 0)
+            if group_id in statistics:
+                raise ValueError('ID di gruppo duplicato.')
+            bucket_counts = []
+            for index, fields in zip(bucket_fields[::2], bucket_fields[1::2]):
+                if int(index) != len(bucket_counts):
+                    raise ValueError('Ordine dei bucket non valido.')
+                bucket_counts.append(counter_fields(fields))
+            duration = values.get('duration')
+            statistics[group_id] = (float(duration.rstrip('s')) if duration else None,
+                                    counter_fields(header), bucket_counts)
+        except (KeyError, ValueError) as error:
+            raise ValueError(f'Contatori gruppo non validi: {line.strip()}') from error
+    if not statistics and 'OFPST_GROUP' not in dump:
+        raise ValueError('Il dump non contiene contatori dei gruppi OpenFlow.')
+    result = []
+    for group in groups:
+        duration, totals, counters = statistics.get(group.group_id, (None, (None, None), []))
+        if counters and len(counters) != len(group.buckets):
+            raise ValueError(f'Il gruppo {group.group_id} ha cambiato bucket durante la lettura.')
+        buckets = tuple(Bucket(bucket.weight, bucket.actions, *counts)
+                        for bucket, counts in zip(group.buckets, counters))
+        result.append(Group(group.group_id, group.kind, buckets or group.buckets,
+                            duration, *totals))
+    return tuple(result)
+
+
 def run_ovs(command):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=10)
@@ -84,6 +192,22 @@ def run_ovs(command):
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or 'Comando Open vSwitch fallito.')
     return result.stdout
+
+
+def read_state(switch, source_file=None):
+    dump = (source_file.read_text() if source_file else
+            run_ovs(['ovs-ofctl', '-O', 'OpenFlow13', 'dump-flows', switch]))
+    flows = parse_dump(dump)
+    if source_file:
+        return flows, None
+    try:
+        groups = parse_groups(run_ovs([
+            'ovs-ofctl', '-O', 'OpenFlow13', 'dump-groups', switch]))
+        stats = run_ovs(['ovs-ofctl', '-O', 'OpenFlow13', 'dump-group-stats', switch])
+        return flows, GroupSnapshot(parse_group_stats(stats, groups))
+    except (RuntimeError, ValueError) as error:
+        # Un errore dei gruppi non deve nascondere le tabelle dei flow.
+        return flows, GroupSnapshot(error=str(error))
 
 
 def available_switches():
@@ -147,6 +271,8 @@ def readable_actions(actions):
             parts.append('Rimuovi tag VLAN')
         elif action.startswith('output:'):
             parts.append('Invia a porta ' + action.split(':', 1)[1])
+        elif action.startswith('group:'):
+            parts.append('Usa gruppo ' + action.split(':', 1)[1])
         elif re.fullmatch(r'set_field:\d+->vlan_vid', action):
             value = int(action.split(':')[1].split('->')[0])
             parts.append(f'VLAN {value & 0xfff}')
@@ -165,6 +291,30 @@ def delta(flow, baseline):
     return flow.packets - before.packets, flow.byte_count - before.byte_count
 
 
+def bucket_deltas(group, before):
+    """Un confronto non valido invalida anche la percentuale dell'intero gruppo."""
+    if before is None:
+        return None, 'nuovo gruppo / riferimento assente'
+    if group.definition != before.definition:
+        return None, 'gruppo modificato: salvare un nuovo riferimento con b'
+    if (group.duration is not None and before.duration is not None
+            and group.duration < before.duration):
+        return None, 'reset: gruppo reinstallato'
+    totals = ((group.packets, before.packets), (group.byte_count, before.byte_count))
+    if any(after is not None and old is not None and after < old for after, old in totals):
+        return None, 'reset: contatori diminuiti'
+    changes = []
+    for bucket, old in zip(group.buckets, before.buckets):
+        if None in (bucket.packets, old.packets, bucket.byte_count, old.byte_count):
+            return None, 'contatori bucket non disponibili'
+        packets = bucket.packets - old.packets
+        byte_count = bucket.byte_count - old.byte_count
+        if packets < 0 or byte_count < 0:
+            return None, 'reset: contatori bucket diminuiti'
+        changes.append((packets, byte_count))
+    return changes, None
+
+
 def table(headers, rows, widths):
     def row_lines(row):
         cells = [textwrap.wrap(str(cell), width, break_long_words=True,
@@ -179,7 +329,42 @@ def table(headers, rows, widths):
         print('\n'.join(row_lines(row)))
 
 
-def show(switch, flows, baseline, active_only=False):
+def show_groups(snapshot, baseline):
+    print('\nGRUPPI E BUCKET DELLO SWITCH')
+    if snapshot.error:
+        print(f'Errore nella lettura dei gruppi: {snapshot.error}')
+        return
+    if not snapshot.groups:
+        print('Nessun gruppo installato.')
+        return
+    previous = ({group.group_id: group for group in baseline.groups}
+                if baseline and not baseline.error else {})
+    print('Prima = riferimento b; dopo = ultima lettura. n/d = contatore non disponibile.')
+    print('Quota = delta pacchetti del bucket / somma dei delta del gruppo; non implica 50/50.')
+    for group in snapshot.groups:
+        before = previous.get(group.group_id)
+        changes, error = bucket_deltas(group, before)
+        total = sum(packets for packets, _ in changes) if changes is not None else 0
+        print(f'\nGruppo {group.group_id} | tipo {group.kind} | {len(group.buckets)} bucket')
+        if error:
+            print(f'Delta e quote non disponibili: {error}.')
+        elif not total:
+            print('Nessun incremento dei pacchetti: quote non calcolate.')
+        rows = []
+        for index, bucket in enumerate(group.buckets):
+            old = before.buckets[index] if before and index < len(before.buckets) else None
+            packets, byte_count = changes[index] if changes is not None else ('n/d', 'n/d')
+            percentage = f'{100 * packets / total:.1f}%' if total else 'n/d'
+            rows.append((index, bucket.weight, readable_actions(bucket.actions),
+                         old.packets if old else None, bucket.packets, packets,
+                         old.byte_count if old else None, bucket.byte_count, byte_count, percentage))
+        rows = [tuple('n/d' if cell is None else cell for cell in row) for row in rows]
+        table(('Bucket', 'Peso', 'Azioni / uscita', 'Pkt prima', 'Pkt dopo', 'Delta pkt',
+               'Byte prima', 'Byte dopo', 'Delta byte', 'Quota pkt'), rows,
+              (6, 4, 16, 10, 10, 10, 10, 10, 10, 9))
+
+
+def show(switch, flows, baseline, active_only=False, groups=None, group_baseline=None):
     if sys.stdout.isatty():
         print('\033[2J\033[H', end='')
     print(f'{switch} | {datetime.now().strftime("%H:%M:%S")} | {len(flows)} regole')
@@ -211,6 +396,8 @@ def show(switch, flows, baseline, active_only=False):
           (3, 3, 4, 12, 27, 8, 10, 12))
     if not rows:
         print('Nessuna regola con pacchetti.')
+    if groups is not None:
+        show_groups(groups, group_baseline)
     print('\nInserisci un ID per match, azioni e delta byte della singola regola.')
 
 
@@ -227,15 +414,12 @@ def main():
         switch = args.switch or ('Dump da file' if args.file else choose_switch())
         if switch is None:
             return 0
-        def read():
-            dump = (args.file.read_text() if args.file else
-                    run_ovs(['ovs-ofctl', '-O', 'OpenFlow13', 'dump-flows', switch]))
-            return parse_dump(dump)
-        flows = read()
+        flows, groups = read_state(switch, args.file)
         baseline = {f.key: f for f in flows}
+        group_baseline = groups
         active = args.active
         while True:
-            show(switch, flows, baseline, active)
+            show(switch, flows, baseline, active, groups, group_baseline)
             if args.once or not sys.stdin.isatty():
                 return 0
             command = input('\nr aggiorna | b riferimento prima del test | a tutte/attive | '
@@ -244,10 +428,11 @@ def main():
                 return 0
             try:
                 if command == 'r':
-                    flows = read()
+                    flows, groups = read_state(switch, args.file)
                 elif command == 'b':
-                    flows = read()
+                    flows, groups = read_state(switch, args.file)
                     baseline = {f.key: f for f in flows}
+                    group_baseline = groups
                 elif command == 'a':
                     active = not active
                 elif command == 's' and not args.file:
@@ -255,10 +440,10 @@ def main():
                     if selected is None:
                         return 0
                     # Confermare la nuova lettura prima di cambiare selezione.
-                    new_flows = parse_dump(run_ovs([
-                        'ovs-ofctl', '-O', 'OpenFlow13', 'dump-flows', selected]))
-                    switch, flows = selected, new_flows
+                    new_flows, new_groups = read_state(selected)
+                    switch, flows, groups = selected, new_flows, new_groups
                     baseline = {f.key: f for f in flows}
+                    group_baseline = groups
                 elif command.isdigit() and 1 <= int(command) <= len(flows):
                     flow = flows[int(command) - 1]
                     dp, db = delta(flow, baseline)

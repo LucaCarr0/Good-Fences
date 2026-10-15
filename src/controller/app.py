@@ -8,7 +8,7 @@ from ryu.lib import hub
 from ryu.ofproto import ofproto_v1_3
 from network_models import NetworkModel
 from controller.arp_proxy import build_arp_reply
-from controller.pipeline import base_tables, install_entry_tables
+from controller.pipeline import base_tables, install_entry_tables, prepare_pipeline
 
 
 class GoodFencesApp(app_manager.RyuApp):
@@ -54,18 +54,26 @@ class GoodFencesApp(app_manager.RyuApp):
             
         self.datapaths[dp.id] = dp
         self.ready.discard(dp.id)
-        install_entry_tables(dp, self.model)
-        barrier = dp.ofproto_parser.OFPBarrierRequest(dp)
-        dp.set_xid(barrier)
-        self.pending[dp.id] = (dp, barrier.xid)
-        dp.send_msg(barrier)
-        hub.spawn_after(10, self._installation_timeout, dp, barrier.xid)
+        prepare_pipeline(dp, self.model)
+        if self.model.is_leaf(dp.id):
+            self._request_barrier(dp, 'groups')
+        else:
+            install_entry_tables(dp, self.model)
+            self._request_barrier(dp, 'flows')
         self.logger.info('Connesso DPID=%016x OpenFlow=1.3; installazione inviata', dp.id)
 
-    def _installation_timeout(self, dp, xid):
-        if self.pending.get(dp.id) == (dp, xid):
+    def _request_barrier(self, dp, phase):
+        """Attende la fase corrente, con lo stesso timeout per gruppi e flow."""
+        barrier = dp.ofproto_parser.OFPBarrierRequest(dp)
+        dp.set_xid(barrier)
+        self.pending[dp.id] = (dp, barrier.xid, phase)
+        dp.send_msg(barrier)
+        hub.spawn_after(10, self._installation_timeout, dp, barrier.xid, phase)
+
+    def _installation_timeout(self, dp, xid, phase):
+        if self.pending.get(dp.id) == (dp, xid, phase):
             self.pending.pop(dp.id, None)
-            self.logger.error('Timeout installazione DPID=%016x', dp.id)
+            self.logger.error('Timeout installazione DPID=%016x fase=%s', dp.id, phase)
             dp.close()
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -92,9 +100,14 @@ class GoodFencesApp(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPBarrierReply, [CONFIG_DISPATCHER, MAIN_DISPATCHER])
     def barrier_reply_handler(self, ev):
         dp = ev.msg.datapath
-        if self.pending.get(dp.id) != (dp, ev.msg.xid):
+        pending = self.pending.get(dp.id)
+        if pending is None or pending[:2] != (dp, ev.msg.xid):
             return
         self.pending.pop(dp.id)
+        if pending[2] == 'groups':
+            install_entry_tables(dp, self.model)
+            self._request_barrier(dp, 'flows')
+            return
         self.ready.add(dp.id)
         self.logger.info('PIPELINE READY DPID=%016x tabelle=%s (%d/%d)',
                          dp.id, base_tables(self.model, dp.id),

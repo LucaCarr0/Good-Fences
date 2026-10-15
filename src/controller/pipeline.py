@@ -1,4 +1,4 @@
-"""Classificazione e forwarding unicast per tenant sul primo uplink."""
+"""Classificazione per tenant e forwarding unicast con ECMP sugli uplink."""
 
 from ryu.lib.packet import arp, ether_types
 
@@ -12,6 +12,7 @@ TRANSIT_COOKIE = 0x47460042
 LOCAL_COOKIE = 0x47460050
 UPLINK_COOKIE = 0x47460051
 SPINE_COOKIE = 0x47460052
+ECMP_GROUP_ID = 1
 
 
 def base_tables(model, dpid):
@@ -44,12 +45,33 @@ def install_base_pipeline(datapath, model):
         _add_flow(datapath, table, 0, BASE_COOKIE, {})
 
 
-def install_entry_tables(datapath, model):
-    """Installa classificazione, proxy ARP e forwarding statico per tenant."""
-    # Validare prima di inviare qualsiasi regola permissiva.
+def install_ecmp_group(datapath, uplink_ports):
+    """Ricrea il gruppo del leaf con un bucket di peso uguale per uplink."""
+    ofp, parser = datapath.ofproto, datapath.ofproto_parser
+    # Alla riconnessione il gruppo può esistere ancora nello switch.
+    datapath.send_msg(parser.OFPGroupMod(
+        datapath, command=ofp.OFPGC_DELETE, group_id=ECMP_GROUP_ID))
+    if not uplink_ports:
+        return
+    buckets = [parser.OFPBucket(
+        weight=1, watch_port=ofp.OFPP_ANY, watch_group=ofp.OFPG_ANY,
+        actions=[parser.OFPActionOutput(port)]) for port in uplink_ports]
+    datapath.send_msg(parser.OFPGroupMod(
+        datapath, command=ofp.OFPGC_ADD, type_=ofp.OFPGT_SELECT,
+        group_id=ECMP_GROUP_ID, buckets=buckets))
+
+
+def prepare_pipeline(datapath, model):
+    """Ripristina i DROP e prepara i gruppi prima dei flow permissivi."""
     model.validate_configuration()
-    access_hosts, _ = model.get_arp_bindings()
     install_base_pipeline(datapath, model)
+    if model.is_leaf(datapath.id):
+        install_ecmp_group(datapath, model.get_leaf_uplink_ports())
+
+
+def install_entry_tables(datapath, model):
+    """Installa i flow; sui leaf richiede la Barrier dopo prepare_pipeline."""
+    access_hosts, _ = model.get_arp_bindings()
     if not model.is_leaf(datapath.id):
         _install_spine_forwarding(datapath, model, access_hosts)
         return
@@ -95,7 +117,7 @@ def install_entry_tables(datapath, model):
     for tenant in model.tenants:
         tagged_ipv4 = dict(eth_type=ether_types.ETH_TYPE_IP,
                            vlan_vid=ofp.OFPVID_PRESENT | tenant.tag)
-        for port in model.get_leaf_uplink_ports()[:1]:
+        for port in model.get_leaf_uplink_ports():
             _add_flow(datapath, 0, 200, UPLINK_IPV4_COOKIE,
                       dict(tagged_ipv4, in_port=port),
                       [parser.OFPInstructionGotoTable(1)])
@@ -121,18 +143,15 @@ def _install_leaf_forwarding(datapath, model, access_hosts):
                     _add_flow(datapath, 2, 200, UPLINK_COOKIE,
                               dict(destination, in_port=source_port), [
                         parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, [
-                            parser.OFPActionOutput(model.hosts_per_leaf + 1)])])
+                            parser.OFPActionGroup(ECMP_GROUP_ID)])])
 
 
 def _install_spine_forwarding(datapath, model, access_hosts):
-
-    if datapath.id != 101:
-        return
     ofp, parser = datapath.ofproto, datapath.ofproto_parser
-    for (leaf_id, _), (tag, host) in access_hosts.items(): # scorre tutti gli host della rete (9 hosts)
+    for (leaf_id, _), (tag, host) in access_hosts.items():
         out_port = model.get_spine_port_to_leaf(leaf_id)
         for source_leaf in range(1, model.leaves + 1):
-            if source_leaf == leaf_id: # 2 regole per leaf: 18 regole totali, 
+            if source_leaf == leaf_id:
                 continue
             _add_flow(datapath, 0, 200, SPINE_COOKIE, dict(
                 in_port=model.get_spine_port_to_leaf(source_leaf),
