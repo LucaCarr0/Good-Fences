@@ -76,9 +76,9 @@ class NetworkModel:
         tags = set()
         assigned_hosts = set()
         assigned_ports = set()
-        ips = set()
         
         for tenant in self.tenants:
+            ips = set()
             if type(tenant.tag) is not int:
                 raise ConfigValidationError(f"Tag VLAN mancante o non intero nel tenant {tenant.name}.")
             if not (1 <= tenant.tag <= 4094):

@@ -1,4 +1,4 @@
-"""Default deny e ammissione dello sprint 1.2; nessun forwarding dati."""
+"""Classificazione e forwarding unicast per tenant sul primo uplink."""
 
 from ryu.lib.packet import arp, ether_types
 
@@ -9,6 +9,9 @@ ARP_COOKIE = 0x47460030
 HOST_IPV4_COOKIE = 0x47460040
 UPLINK_IPV4_COOKIE = 0x47460041
 TRANSIT_COOKIE = 0x47460042
+LOCAL_COOKIE = 0x47460050
+UPLINK_COOKIE = 0x47460051
+SPINE_COOKIE = 0x47460052
 
 
 def base_tables(model, dpid):
@@ -42,12 +45,13 @@ def install_base_pipeline(datapath, model):
 
 
 def install_entry_tables(datapath, model):
-    """Installa ARP in tabella 0 e classificazione IPv4 fino al DROP finale."""
+    """Installa classificazione, proxy ARP e forwarding statico per tenant."""
     # Validare prima di inviare qualsiasi regola permissiva.
     model.validate_configuration()
     access_hosts, _ = model.get_arp_bindings()
     install_base_pipeline(datapath, model)
     if not model.is_leaf(datapath.id):
+        _install_spine_forwarding(datapath, model, access_hosts)
         return
 
     ofp, parser = datapath.ofproto, datapath.ofproto_parser
@@ -91,9 +95,49 @@ def install_entry_tables(datapath, model):
     for tenant in model.tenants:
         tagged_ipv4 = dict(eth_type=ether_types.ETH_TYPE_IP,
                            vlan_vid=ofp.OFPVID_PRESENT | tenant.tag)
-        for port in model.get_leaf_uplink_ports():
+        for port in model.get_leaf_uplink_ports()[:1]:
             _add_flow(datapath, 0, 200, UPLINK_IPV4_COOKIE,
                       dict(tagged_ipv4, in_port=port),
                       [parser.OFPInstructionGotoTable(1)])
-        _add_flow(datapath, 1, 200, TRANSIT_COOKIE, tagged_ipv4,
-                  [parser.OFPInstructionGotoTable(2)])
+    _install_leaf_forwarding(datapath, model, access_hosts)
+
+
+def _install_leaf_forwarding(datapath, model, access_hosts):
+    ofp, parser = datapath.ofproto, datapath.ofproto_parser
+    for (leaf_id, port), (tag, host) in access_hosts.items():
+        destination = dict(vlan_vid=ofp.OFPVID_PRESENT | tag, eth_dst=host.mac)
+        # Verifica la coppia MAC/IP nel tenant una sola volta, prima dell'output.
+        _add_flow(datapath, 1, 200, TRANSIT_COOKIE, dict(
+            destination, eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=host.ip),
+            [parser.OFPInstructionGotoTable(2)])
+        if leaf_id == datapath.id:
+            _add_flow(datapath, 2, 200, LOCAL_COOKIE, destination, [
+                parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, [
+                    parser.OFPActionPopVlan(), parser.OFPActionOutput(port)])])
+        elif model.spines:
+            # Nessuna regola uplink -> uplink: soltanto gli host originano transito.
+            for (source_leaf, source_port), (source_tag, _) in access_hosts.items():
+                if source_leaf == datapath.id and source_tag == tag:
+                    _add_flow(datapath, 2, 200, UPLINK_COOKIE,
+                              dict(destination, in_port=source_port), [
+                        parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, [
+                            parser.OFPActionOutput(model.hosts_per_leaf + 1)])])
+
+
+def _install_spine_forwarding(datapath, model, access_hosts):
+
+    if datapath.id != 101:
+        return
+    ofp, parser = datapath.ofproto, datapath.ofproto_parser
+    for (leaf_id, _), (tag, host) in access_hosts.items(): # scorre tutti gli host della rete (9 hosts)
+        out_port = model.get_spine_port_to_leaf(leaf_id)
+        for source_leaf in range(1, model.leaves + 1):
+            if source_leaf == leaf_id: # 2 regole per leaf: 18 regole totali, 
+                continue
+            _add_flow(datapath, 0, 200, SPINE_COOKIE, dict(
+                in_port=model.get_spine_port_to_leaf(source_leaf),
+                eth_type=ether_types.ETH_TYPE_IP,
+                vlan_vid=ofp.OFPVID_PRESENT | tag,
+                eth_dst=host.mac, ipv4_dst=host.ip), [
+                    parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, [
+                        parser.OFPActionOutput(out_port)])])
