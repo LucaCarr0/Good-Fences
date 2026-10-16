@@ -1,12 +1,13 @@
 """Verifica frame di attacco e cattura senza richiedere una rete attiva."""
 import unittest
+import json
 from io import StringIO
 from unittest.mock import patch
 
 from scapy.all import ARP, IP, UDP, Dot1Q, Ether
 
 from packet_io import (build_ecmp_packets, build_packet, capture, describe_packet,
-                       main, parse_args, send_ecmp_packets)
+                       execute_case, main, parse_args, send_ecmp_packets)
 
 
 class PacketIoTests(unittest.TestCase):
@@ -94,17 +95,51 @@ class PacketIoTests(unittest.TestCase):
         unrelated = Ether() / IP(proto=1)
         arp = Ether() / ARP()
 
+        ready = unittest.mock.Mock()
+
         def receive(**kwargs):
-            output.assert_called_once_with(
-                'Cattura pronta su h6-eth0: IPv4 protocollo 253 (5s).', flush=True)
+            ready.assert_called_once_with()
+            output.assert_not_called()
             self.assertIs(kwargs['opened_socket'], listen.return_value.__enter__.return_value)
             self.assertEqual(kwargs['timeout'], 5)
             return [pkt for pkt in (valid, unrelated, arp) if kwargs['lfilter'](pkt)]
 
         sniff.side_effect = receive
-        self.assertEqual(capture('h6-eth0', 5), [valid])
+        self.assertEqual(capture('h6-eth0', 5, on_ready=ready), [valid])
         listen.assert_called_once_with(iface='h6-eth0', promisc=True)
         self.assertIn('VLAN: 101', describe_packet(valid))
+
+    @patch('packet_io.print')
+    @patch('packet_io.exchange')
+    def test_core_returns_structured_arp_replies_without_printing(self, exchange, output):
+        exchange.return_value = [Ether(src='00:00:00:00:00:06') /
+                                 ARP(op=2, psrc='10.0.0.2', pdst='10.0.0.1')]
+        result = execute_case('h2-eth0', 'arp-request')
+        self.assertEqual(result['sent_packets'], 1)
+        self.assertEqual(result['frame']['operation'], 1)
+        self.assertEqual(result['replies'][0]['source_ip'], '10.0.0.2')
+        self.assertEqual(result['replies'][0]['operation'], 2)
+        json.dumps(result)
+        output.assert_not_called()
+
+    @patch('packet_io.send_ecmp_packets', return_value=6)
+    @patch('sys.stdout', new_callable=StringIO)
+    def test_json_mode_returns_one_document_without_cli_output(self, output, send):
+        main(['--iface', 'h2-eth0', '--case', 'ecmp-udp', '--flows', '2',
+              '--packets-per-flow', '3', '--json'])
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['sent_packets'], 6)
+        self.assertEqual(result['flows'], 2)
+        self.assertEqual(result['last_source_port'], 40001)
+
+    @patch('packet_io.conf.L2socket')
+    def test_invalid_core_parameters_are_rejected_before_opening_socket(self, socket):
+        for options in ({'mac': 'bad'}, {'ip': 'not-an-ip'}, {'vlan': 4095},
+                        {'timeout': float('nan')}, {'timeout': float('inf')},
+                        {'flows': 25537}, {'packets_per_flow': 0}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                execute_case('h2-eth0', 'ecmp-udp', **options)
+        socket.assert_not_called()
 
 
 if __name__ == '__main__':

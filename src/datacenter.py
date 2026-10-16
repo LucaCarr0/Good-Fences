@@ -1,4 +1,6 @@
 import argparse
+import signal
+import threading
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
@@ -7,6 +9,7 @@ from mininet.log import setLogLevel, info
 from mininet.cli import CLI
 
 from network_models import NetworkModel
+from runtime_status import write_status
 
 class SpineLeafTopo(Topo):
     def build(self):
@@ -79,12 +82,34 @@ def main():
     parser.add_argument('--controller-port', type=int, default=6653, help='Porta del RemoteController')
     parser.add_argument('--cli', action='store_true', help='Avvia la CLI di Mininet al termine del setup')
     parser.add_argument('--test-none', action='store_true', help='Esegue il test di packet loss in assenza di regole')
+    parser.add_argument('--headless', action='store_true',
+                        help='Mantiene la rete attiva senza CLI fino a SIGTERM/SIGINT')
+    parser.add_argument('--state-file', help='Snapshot JSON degli host per la GUI')
     args = parser.parse_args()
+    if args.headless and (args.cli or args.test_none):
+        parser.error('--headless non è compatibile con --cli o --test-none')
+    if args.state_file and not args.headless:
+        parser.error('--state-file richiede --headless')
 
     setLogLevel('info')
     info('*** Inizializzazione della rete...\n')
     
     net = create_network(args.controller, args.controller_ip, args.controller_port)
+    stopped = threading.Event()
+    if args.headless:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda signum, frame: stopped.set())
+    try:
+        run_network(net, args, stopped)
+    finally:
+        info('*** Chiusura di Mininet...\n')
+        try:
+            net.stop()
+        finally:
+            write_status(args.state_file, {'state': 'stopped', 'hosts': {}})
+
+
+def run_network(net, args, stopped):
     net.start()
 
     info('*** Disabilitazione IPv6 su tutti gli host...\n')
@@ -92,6 +117,14 @@ def main():
         host.cmd("sysctl -w net.ipv6.conf.all.disable_ipv6=1")
         host.cmd("sysctl -w net.ipv6.conf.default.disable_ipv6=1")
         host.cmd("sysctl -w net.ipv6.conf.lo.disable_ipv6=1")
+
+    if args.headless:
+        write_status(args.state_file, {
+            'state': 'running',
+            'hosts': {host.name: host.pid for host in net.hosts},
+        })
+        stopped.wait()
+        return
 
     if args.test_none:
         info('*** Esecuzione test Phase F1: Ping da h1 a h5...\n')
@@ -111,9 +144,6 @@ def main():
     if args.cli:
         info('*** Avvio della Mininet CLI...\n')
         CLI(net)
-
-    info('*** Chiusura di Mininet...\n')
-    net.stop()
 
 if __name__ == '__main__':
     main()

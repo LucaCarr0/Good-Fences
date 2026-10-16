@@ -1,0 +1,4 @@
+# Estensione opzionale della .venv del progetto (Python 3.9).
+streamlit==1.50.0
+pandas>=2.2,<3
+plotly>=6.3,<7
