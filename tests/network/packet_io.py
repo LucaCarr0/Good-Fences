@@ -1,5 +1,9 @@
 """Invio e cattura di frame dalla CLI Mininet per verificare la pipeline."""
 import argparse
+import ipaddress
+import json
+import math
+import re
 
 from scapy.all import ARP, IP, UDP, Dot1Q, Ether, conf, sniff
 
@@ -66,11 +70,11 @@ def send_ecmp_packets(iface, packets, packets_per_flow):
     return sent
 
 
-def capture(iface, timeout):
+def capture(iface, timeout, on_ready=None):
     # Sul destinatario, promisc include anche eventuali consegne al MAC errato.
     with conf.L2listen(iface=iface, promisc=True) as receiver:
-        print(f'Cattura pronta su {iface}: IPv4 protocollo 253 ({timeout:g}s).',
-              flush=True)
+        if on_ready is not None:
+            on_ready()
         return sniff(opened_socket=receiver, timeout=timeout,
                      lfilter=lambda pkt: IP in pkt and pkt[IP].proto == 253)
 
@@ -99,6 +103,78 @@ def describe_packet(packet):
     return '\n'.join(lines)
 
 
+def packet_details(packet):
+    """Dati del frame per client Python/JSON; il testo è solo presentazione."""
+    details = {'ether_src': packet[Ether].src, 'ether_dst': packet[Ether].dst,
+               'vlan': packet[Dot1Q].vlan if Dot1Q in packet else None,
+               'description': describe_packet(packet)}
+    if ARP in packet:
+        arp = packet[ARP]
+        details.update(protocol='ARP', operation=int(arp.op),
+                       source_ip=arp.psrc, target_ip=arp.pdst,
+                       source_mac=arp.hwsrc, target_mac=arp.hwdst)
+    elif IP in packet:
+        details.update(protocol='IPv4', source_ip=packet[IP].src,
+                       target_ip=packet[IP].dst, ip_protocol=int(packet[IP].proto))
+        if UDP in packet:
+            details.update(source_port=packet[UDP].sport, target_port=packet[UDP].dport)
+    return details
+
+
+def validate_case(case, mac, ip, target_ip, target_mac, vlan, timeout,
+                  flows, packets_per_flow):
+    if case not in CASES:
+        raise ValueError(f'Caso non supportato: {case}')
+    for value in (mac, target_mac):
+        if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', value):
+            raise ValueError(f'MAC non valido: {value}')
+    for value in (ip, target_ip):
+        ipaddress.IPv4Address(value)
+    if type(vlan) is not int or not 1 <= vlan <= 4094:
+        raise ValueError('La VLAN deve essere compresa tra 1 e 4094')
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('--timeout deve essere positivo e finito')
+    if case == 'ecmp-udp':
+        if (type(flows) is not int or type(packets_per_flow) is not int
+                or flows <= 0 or packets_per_flow <= 0):
+            raise ValueError('--flows e --packets-per-flow devono essere interi positivi')
+        if ECMP_FIRST_SOURCE_PORT + flows - 1 > 65535:
+            raise ValueError('--flows genera porte UDP sorgenti oltre 65535')
+
+
+def execute_case(iface, case, mac='00:00:00:00:00:02', ip='10.0.0.1',
+                 target_ip='10.0.0.2', target_mac='00:00:00:00:00:06',
+                 vlan=102, timeout=1, flows=100, packets_per_flow=10):
+    """Esegue un invio senza stampare e restituisce un risultato serializzabile.
+
+    Deve essere chiamata nel namespace Mininet della sorgente. `sent_packets`
+    conta gli invii completati: non è una verifica di consegna o isolamento.
+    """
+    validate_case(case, mac, ip, target_ip, target_mac, vlan, timeout,
+                  flows, packets_per_flow)
+    result = {'case': case, 'iface': iface, 'sent_packets': 0, 'replies': [],
+              'source_mac': mac, 'source_ip': ip, 'target_mac': target_mac,
+              'target_ip': target_ip, 'timeout': timeout}
+    if case == 'ecmp-udp':
+        packets = build_ecmp_packets(mac, ip, target_ip, target_mac, flows)
+        result.update(flows=flows, packets_per_flow=packets_per_flow,
+                      first_source_port=ECMP_FIRST_SOURCE_PORT,
+                      last_source_port=ECMP_FIRST_SOURCE_PORT + flows - 1,
+                      destination_port=ECMP_DESTINATION_PORT)
+        result['sent_packets'] = send_ecmp_packets(iface, packets, packets_per_flow)
+        return result
+    frame = build_packet(case, mac, ip, target_ip, target_mac, vlan)
+    result['frame'] = packet_details(frame)
+    if IP in frame:
+        with conf.L2socket(iface=iface) as sender:
+            sender.send(frame)
+    else:
+        result['replies'] = [packet_details(packet)
+                             for packet in exchange(iface, frame, timeout)]
+    result['sent_packets'] = 1
+    return result
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--iface', required=True)
@@ -117,6 +193,8 @@ def parse_args(argv=None):
                         help='Flussi UDP del caso ecmp-udp (default: 100)')
     parser.add_argument('--packets-per-flow', type=int,
                         help='Pacchetti per flusso di ecmp-udp (default: 10)')
+    parser.add_argument('--json', action='store_true',
+                        help='Restituisce dati strutturati per il client GUI')
     args = parser.parse_args(argv)
     if args.case == 'ecmp-udp':
         if args.flows is None:
@@ -131,8 +209,14 @@ def parse_args(argv=None):
         parser.error('--flows e --packets-per-flow richiedono --case ecmp-udp')
     if args.timeout is None:
         args.timeout = 5 if args.listen else 1
-    if args.timeout <= 0:
-        parser.error('--timeout deve essere positivo')
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error('--timeout deve essere positivo e finito')
+    if args.case:
+        try:
+            validate_case(args.case, args.mac, args.ip, args.target_ip, args.target_mac,
+                          args.vlan, args.timeout, args.flows, args.packets_per_flow)
+        except ValueError as error:
+            parser.error(str(error))
     return args
 
 
@@ -140,7 +224,15 @@ def main(argv=None):
     args = parse_args(argv)
     timeout = args.timeout
     if args.listen:
-        packets = capture(args.iface, timeout)
+        def ready():
+            print(f'Cattura pronta su {args.iface}: IPv4 protocollo 253 ({timeout:g}s).',
+                  flush=True)
+
+        packets = capture(args.iface, timeout, on_ready=None if args.json else ready)
+        if args.json:
+            print(json.dumps({'iface': args.iface,
+                              'captured': [packet_details(packet) for packet in packets]}))
+            return
         print(f'Frame IPv4 protocollo 253 catturati: {len(packets)}')
         if not packets:
             print(f'  Nessun frame catturato entro {timeout:g} secondi.')
@@ -148,8 +240,14 @@ def main(argv=None):
             print(f'Frame {index}:')
             print(describe_packet(packet))
         return
+    result = execute_case(args.iface, args.case, args.mac, args.ip, args.target_ip,
+                          args.target_mac, args.vlan, timeout,
+                          args.flows, args.packets_per_flow)
+    if args.json:
+        print(json.dumps(result))
+        return
     if args.case == 'ecmp-udp':
-        last_port = ECMP_FIRST_SOURCE_PORT + args.flows - 1
+        last_port = result['last_source_port']
         print(f'Caso: {args.case} | Interfaccia: {args.iface}')
         print(f'Ethernet: {args.mac} -> {args.target_mac}')
         print(f'IPv4: {args.ip} -> {args.target_ip}')
@@ -158,28 +256,21 @@ def main(argv=None):
         print(f'Traffico offerto: {args.flows} flussi UDP,'
               f' {args.packets_per_flow} pacchetti per flusso'
               f' ({args.flows * args.packets_per_flow} pacchetti).', flush=True)
-        packets = build_ecmp_packets(args.mac, args.ip, args.target_ip,
-                                    args.target_mac, args.flows)
-        sent = send_ecmp_packets(args.iface, packets, args.packets_per_flow)
-        print(f'Pacchetti effettivamente inviati: {sent}')
+        print(f'Pacchetti effettivamente inviati: {result["sent_packets"]}')
         return
-    frame = build_packet(args.case, args.mac, args.ip, args.target_ip,
-                         args.target_mac, args.vlan)
     print(f'Caso: {args.case} | Interfaccia: {args.iface}')
     print('Pacchetto inviato:')
-    print(describe_packet(frame), flush=True)
-    if IP in frame:
-        with conf.L2socket(iface=args.iface) as sender:
-            sender.send(frame)
+    print(result['frame']['description'], flush=True)
+    if result['frame']['protocol'] == 'IPv4':
         print('Consegna verificabile con --listen avviato prima sul destinatario.')
         return
-    replies = exchange(args.iface, frame, timeout)
+    replies = result['replies']
     print(f'Risposte ARP/RARP ricevute: {len(replies)}')
     if not replies:
         print(f'  Nessuna risposta ricevuta entro {timeout:g} secondi.')
     for index, reply in enumerate(replies, start=1):
         print(f'Risposta {index}:')
-        print(describe_packet(reply))
+        print(reply['description'])
 
 
 if __name__ == '__main__':

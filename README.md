@@ -7,6 +7,27 @@ i bridge leafN/spineN e le relative interfacce. Questi nomi sono riservati
 a Good-Fences: una nuova esecuzione sostituisce la simulazione precedente,
 anche se ancora attiva. Il controller Ryu resta in esecuzione.
 
+## Visualizzatore GUI
+
+La dashboard Streamlit avvia e arresta **Mininet e Ryu**, mostra la topologia,
+invia i casi di `packet_io.py` dagli host e confronta flow e bucket OpenFlow.
+Usa la `.venv` Python 3.9 esistente con dipendenze opzionali:
+
+```bash
+.venv/bin/python -m pip install -r requirements-visualizer.txt
+bash scripts/start-visualizer.sh
+```
+
+Aprire <http://127.0.0.1:8501>, premere **Avvia rete** e attendere **5/5 switch
+READY** con la configurazione attuale. In questa modalità non avviare i due
+script CLI: chiudere prima eventuali reti Mininet con `exit` e controller con
+`Ctrl+C`. La GUI segnala i conflitti senza sostituire una rete esterna.
+**Arresta rete** chiude prima Mininet e poi Ryu. La chiusura della scheda del
+browser lascia attiva la simulazione; arrestarla dalla GUI prima di terminare
+Streamlit con `Ctrl+C`.
+
+La [guida del visualizzatore](docs/visualizer.md) descrive viste e verifiche.
+
 ## Proxy ARP
 
 Il controller risponde alle richieste ARP degli host assegnati usando IP e MAC

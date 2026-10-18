@@ -1,4 +1,5 @@
 """App Ryu minimale; avviare dalla radice con PYTHONPATH=src."""
+import os
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import (
@@ -9,6 +10,7 @@ from ryu.ofproto import ofproto_v1_3
 from network_models import NetworkModel
 from controller.arp_proxy import build_arp_reply
 from controller.pipeline import base_tables, install_entry_tables, prepare_pipeline
+from runtime_status import write_status
 
 
 class GoodFencesApp(app_manager.RyuApp):
@@ -25,8 +27,20 @@ class GoodFencesApp(app_manager.RyuApp):
         self.datapaths = {}
         self.ready = set()
         self.pending = {}
+        self.status_file = os.environ.get('GOOD_FENCES_STATUS_FILE')
+        self._publish_status()
         self.logger.info('DPID attesi: %s',
                          ', '.join(f'{d:016x}' for d in sorted(self.expected_dpids)))
+
+    def _publish_status(self, error=None):
+        path = getattr(self, 'status_file', None)
+        if path:
+            try:
+                write_status(path, {'ready': sorted(self.ready),
+                                    'expected': sorted(self.expected_dpids),
+                                    'error': error})
+            except OSError as failure:
+                self.logger.error('Impossibile pubblicare lo stato GUI: %s', failure)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -54,6 +68,7 @@ class GoodFencesApp(app_manager.RyuApp):
             
         self.datapaths[dp.id] = dp
         self.ready.discard(dp.id)
+        self._publish_status()
         prepare_pipeline(dp, self.model)
         if self.model.is_leaf(dp.id):
             self._request_barrier(dp, 'groups')
@@ -73,6 +88,8 @@ class GoodFencesApp(app_manager.RyuApp):
     def _installation_timeout(self, dp, xid, phase):
         if self.pending.get(dp.id) == (dp, xid, phase):
             self.pending.pop(dp.id, None)
+            self.ready.discard(dp.id)
+            self._publish_status(f'Timeout DPID={dp.id} fase={phase}')
             self.logger.error('Timeout installazione DPID=%016x fase=%s', dp.id, phase)
             dp.close()
 
@@ -109,6 +126,7 @@ class GoodFencesApp(app_manager.RyuApp):
             self._request_barrier(dp, 'flows')
             return
         self.ready.add(dp.id)
+        self._publish_status()
         self.logger.info('PIPELINE READY DPID=%016x tabelle=%s (%d/%d)',
                          dp.id, base_tables(self.model, dp.id),
                          len(self.ready), len(self.expected_dpids))
@@ -124,6 +142,7 @@ class GoodFencesApp(app_manager.RyuApp):
         if self.datapaths.get(dp.id) is dp:
             self.pending.pop(dp.id, None)
             self.ready.discard(dp.id)
+            self._publish_status(f'Errore OpenFlow DPID={dp.id}: tipo={msg.type}, codice={msg.code}')
         dp.close()
 
     @set_ev_cls(ofp_event.EventOFPStateChange, DEAD_DISPATCHER)
@@ -133,5 +152,6 @@ class GoodFencesApp(app_manager.RyuApp):
             self.datapaths.pop(dp.id)
             self.pending.pop(dp.id, None)
             self.ready.discard(dp.id)
+            self._publish_status(f'Switch disconnesso: DPID={dp.id}')
             self.logger.warning('Disconnesso DPID=%016x (%d/%d pronti)',
                                 dp.id, len(self.ready), len(self.expected_dpids))
