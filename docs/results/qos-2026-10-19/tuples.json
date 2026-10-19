@@ -1,0 +1,192 @@
+[
+  {
+    "source": "h2",
+    "target": "h6",
+    "offered_mbps": 15,
+    "source_port": 40000,
+    "port": 5201,
+    "role": "victim",
+    "paths": [
+      5
+    ],
+    "ping_paths": [
+      5
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41000,
+    "port": 5300,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41001,
+    "port": 5301,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41002,
+    "port": 5302,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41003,
+    "port": 5303,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41004,
+    "port": 5304,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41005,
+    "port": 5305,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41006,
+    "port": 5306,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h1",
+    "target": "h5",
+    "offered_mbps": 11.25,
+    "source_port": 41007,
+    "port": 5307,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42000,
+    "port": 5400,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42001,
+    "port": 5401,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42002,
+    "port": 5402,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42003,
+    "port": 5403,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42004,
+    "port": 5404,
+    "role": "noise",
+    "paths": [
+      5
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42005,
+    "port": 5405,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42008,
+    "port": 5406,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  },
+  {
+    "source": "h3",
+    "target": "h7",
+    "offered_mbps": 11.25,
+    "source_port": 42012,
+    "port": 5407,
+    "role": "noise",
+    "paths": [
+      6
+    ]
+  }
+]

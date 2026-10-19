@@ -13,6 +13,32 @@ LOCAL_COOKIE = 0x47460050
 UPLINK_COOKIE = 0x47460051
 SPINE_COOKIE = 0x47460052
 ECMP_GROUP_ID = 1
+METER_BURST_MS = 100
+
+
+def leaf_tenants(model, dpid):
+    return [tenant for tenant in model.tenants
+            if any(host.leaf == f'leaf{dpid}' for host in tenant.hosts)]
+
+
+def prepare_resources(datapath, model, qos_enabled=True, meter_supported=True):
+    """Richiede i vecchi flow già rimossi; conserva i meter con ID estranei."""
+    if not model.is_leaf(datapath.id):
+        return
+    install_ecmp_group(datapath, model.get_leaf_uplink_ports())
+    if not meter_supported:
+        return
+    ofp, parser = datapath.ofproto, datapath.ofproto_parser
+    for tenant in leaf_tenants(model, datapath.id):
+        datapath.send_msg(parser.OFPMeterMod(
+            datapath, command=ofp.OFPMC_DELETE, meter_id=tenant.tag))
+        if qos_enabled:
+            rate = tenant.rate_mbps * 1000
+            datapath.send_msg(parser.OFPMeterMod(
+                datapath, command=ofp.OFPMC_ADD,
+                flags=ofp.OFPMF_KBPS | ofp.OFPMF_BURST | ofp.OFPMF_STATS,
+                meter_id=tenant.tag, bands=[parser.OFPMeterBandDrop(
+                    rate=rate, burst_size=rate * METER_BURST_MS // 1000)]))
 
 
 def base_tables(model, dpid):
@@ -61,15 +87,15 @@ def install_ecmp_group(datapath, uplink_ports):
         group_id=ECMP_GROUP_ID, buckets=buckets))
 
 
-def prepare_pipeline(datapath, model):
+def prepare_pipeline(datapath, model, qos_enabled=True, resources=True):
     """Ripristina i DROP e prepara i gruppi prima dei flow permissivi."""
     model.validate_configuration()
     install_base_pipeline(datapath, model)
-    if model.is_leaf(datapath.id):
-        install_ecmp_group(datapath, model.get_leaf_uplink_ports())
+    if resources:
+        prepare_resources(datapath, model, qos_enabled)
 
 
-def install_entry_tables(datapath, model):
+def install_entry_tables(datapath, model, qos_enabled=True):
     """Installa i flow; sui leaf richiede la Barrier dopo prepare_pipeline."""
     access_hosts, _ = model.get_arp_bindings()
     if not model.is_leaf(datapath.id):
@@ -106,7 +132,8 @@ def install_entry_tables(datapath, model):
             eth_type=ether_types.ETH_TYPE_IP,
             eth_src=host.mac,
             ipv4_src=host.ip)
-        _add_flow(datapath, 0, 200, HOST_IPV4_COOKIE, vlan_tag_match, [
+        meter = [parser.OFPInstructionMeter(tag)] if qos_enabled else []
+        _add_flow(datapath, 0, 200, HOST_IPV4_COOKIE, vlan_tag_match, meter + [
                 parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, [
                     parser.OFPActionPushVlan(0x8100),
                     parser.OFPActionSetField(vlan_vid=ofp.OFPVID_PRESENT | tag)]),

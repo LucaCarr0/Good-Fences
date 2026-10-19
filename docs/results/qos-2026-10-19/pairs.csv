@@ -1,0 +1,7 @@
+pair,order,validity,goodput_change_mbps,loss_change_pp,victim_goal_met
+1,on/off,confronto valido,6.6691199999999995,-44.459615138456286,True
+2,off/on,confronto valido,6.6272,-44.18227588855229,True
+3,off/on,confronto valido,6.604480000000001,-44.030805990527796,True
+4,on/off,confronto valido,6.693439999999999,-44.62388530955327,True
+5,off/on,confronto valido,6.700479999999999,-44.67081964415241,True
+6,on/off,confronto valido,6.672320000000001,-44.48213333333333,True

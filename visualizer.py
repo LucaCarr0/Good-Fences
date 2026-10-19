@@ -8,6 +8,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yaml
+import io
+import zipfile
+
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -18,6 +21,7 @@ from src.visualizer_support import (
     read_switch, summarize_flows, topology_data,
 )
 from src.network_models import ConfigValidationError
+from src.qos_stats import meter_rows
 
 st.set_page_config(page_title='Good-Fences Visualizer', page_icon='🕸️', layout='wide')
 
@@ -25,6 +29,17 @@ st.set_page_config(page_title='Good-Fences Visualizer', page_icon='🕸️', lay
 @st.cache_resource
 def managed_lab():
     return ManagedLab()
+
+
+@st.cache_data(show_spinner=False)
+def qos_archive(directory):
+    buffer = io.BytesIO()
+    root = Path(directory)
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for path in root.rglob('*'):
+            if path.is_file():
+                archive.write(path, str(path.relative_to(root)))
+    return buffer.getvalue()
 
 
 def refresh_switch(switch, save_reference=False):
@@ -101,6 +116,26 @@ def render_switch(switch, prefix):
         st.caption('Quota = delta pacchetti del bucket / somma dei delta del gruppo. '
                    'I pesi uguali non garantiscono una distribuzione esatta 50/50. '
                    'Contatori indisponibili e reset non vengono rappresentati come zeri.')
+
+    st.subheader('Meter di ingresso IPv4')
+    if snapshot.meters is None:
+        st.info('Meter non disponibili per questa lettura.')
+    elif snapshot.meters.error:
+        st.warning(snapshot.meters.error)
+    else:
+        with st.expander('Capacità meter dichiarate da OVS'):
+            st.code(snapshot.meters.features, language='text')
+        rows = meter_rows(snapshot, reference)
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+            measured = [row for row in rows if row['Delta DROP pkt'] is not None]
+            if measured:
+                st.bar_chart(pd.DataFrame(measured).set_index('Meter')[['Delta ingressi pkt', 'Delta DROP pkt']])
+        else:
+            st.info('Nessun meter installato su questo switch.')
+        st.caption('ID = VLAN tenant; limite aggregato per tenant su ciascun leaf. '
+                   'Rate in kbit/s, burst in kbit (100 ms). ARP escluso. '
+                   'I contatori di ingresso includono i pacchetti scartati dalla banda DROP.')
 
 
 def topology_figure(model, nodes, links, bridges):
@@ -233,7 +268,8 @@ def render_tests(model, lab):
         elif case in ('arp-request', 'arp-probe', 'gratuitous-arp', 'rarp'):
             options['timeout'] = st.number_input('Attesa risposte (secondi)', min_value=0.1,
                                                  max_value=10.0, value=1.0)
-        submitted = st.form_submit_button('Avvia test', disabled=not lab.status()['ready'])
+        submitted = st.form_submit_button('Avvia test', disabled=not lab.status()['ready']
+                                          or bool(lab.experiment and lab.experiment.running))
     if not lab.status()['ready']:
         st.info('Avviare la simulazione e attendere tutti gli switch READY. Poi aggiornare la pagina.')
     if submitted:
@@ -290,9 +326,69 @@ def render_statistics(model):
 
 
 @st.fragment(run_every=2)
+def render_qos(model, lab):
+    st.title('QoS · meter ed esperimenti')
+    st.write('Limiti IPv4 per tenant e per leaf; burst 100 ms. '
+             'Il confronto usa finestre comuni e contatori osservati di invio e ricezione.')
+    st.dataframe(pd.DataFrame([{'Tenant': t.name, 'Meter': t.tag, 'Rate Mbps': t.rate_mbps,
+                               'Rate kbit/s': t.rate_mbps * 1000, 'Burst kbit': t.rate_mbps * 100}
+                              for t in model.tenants]), hide_index=True)
+    job = lab.experiment
+    active = bool(job and job.running)
+    with st.form('qos_experiment'):
+        scenario = st.selectbox('Esperimento', ['isolated', 'noisy-neighbor'])
+        names = [h.name for t in model.tenants for h in t.hosts]
+        source = st.selectbox('Sorgente test isolato', names, index=names.index('h1') if 'h1' in names else 0)
+        target = st.selectbox('Destinazione test isolato', names, index=names.index('h5') if 'h5' in names else 1)
+        matrix = st.checkbox('Test isolato su tutti i meter del modello')
+        duration = st.number_input('Durata della misura (secondi)', min_value=3, max_value=300, value=30)
+        repetitions = st.number_input('Coppie noisy neighbor (numero pari)', min_value=2, max_value=20, value=6, step=2)
+        noise = st.number_input('Mbps offerti da ciascun aggressore', min_value=1., max_value=95., value=90.)
+        st.caption('Noisy neighbor: B h2→h6 a 15 Mbps; A h1→h5 e C h3→h7, '
+                   'otto flussi per aggressore. Assestamento 3 s; seed 42. '
+                   'Le modalità vengono alternate riavviando soltanto Ryu. '
+                   'Le coppie sorgente/destinazione valgono per il test isolato.')
+        start = st.form_submit_button('Avvia esperimento', disabled=active or not lab.status()['ready'])
+    if start:
+        try:
+            job = lab.start_experiment(scenario=scenario, source=source, target=target, matrix=matrix,
+                                      duration=int(duration), repetitions=int(repetitions), noise_mbps=float(noise))
+            active = True
+        except (ValueError, RuntimeError, OSError) as error:
+            st.error(str(error))
+    if job:
+        state = job.status()
+        st.info(f'{state["state"]} · {state["message"]} · prove completate: {state["completed"]}')
+        st.caption(f'Risultati persistenti: {state["output"]}')
+        if st.button('Annulla esperimento', disabled=not active):
+            job.cancel.set()
+        if active:
+            st.caption('Gli altri invii sono sospesi fino al termine e al ripristino della QoS iniziale.')
+        if job.trials:
+            st.plotly_chart(job.figure(), width='stretch')
+        for name in ('pairs.csv', 'summary.csv'):
+            path = job.path / name
+            if path.exists():
+                try:
+                    st.dataframe(pd.read_csv(path), hide_index=True, width='stretch')
+                except (pd.errors.EmptyDataError, pd.errors.ParserError):
+                    st.info('Risultati in aggiornamento.')
+        if not active and job.path.exists():
+            for name in ('intervals.csv', 'summary.csv', 'aggregate.csv', 'meters.csv', 'pairs.csv', 'charts.html', 'config.json'):
+                path = job.path / name
+                if path.exists():
+                    st.download_button(f'Scarica {name}', path.read_bytes(), file_name=name, key=f'qos_{name}')
+            st.download_button('Scarica tutti i dati e i log', qos_archive(str(job.path)), file_name=f'{job.run_id}.zip')
+        st.caption('Senza congestione misurata nel caso senza meter il confronto è non dimostrativo. '
+                   'Gli obiettivi ≥14 Mbps e perdita ≤2% vengono verificati sui risultati.')
+
+
+@st.fragment(run_every=2)
 def render_lab_status(lab):
     status = lab.status()
-    current = (status['running'], status['ready'])
+    qos = status['qos_enabled']
+    st.caption('QoS attuale: ' + ('on' if qos is True else 'off' if qos is False else 'non disponibile'))
+    current = (status['running'], status['ready'], status['controller_generation'])
     previous = st.session_state.get('lab_state', current)
     st.session_state.lab_state = current
     if previous != current:
@@ -316,22 +412,24 @@ def render_lab_status(lab):
 
 def main():
     lab = managed_lab()
-    if st.session_state.get('generation') != lab.generation:
+    generation = (lab.generation, lab.status()['controller_generation'])
+    if st.session_state.get('generation') != generation:
         st.session_state.snapshots = {}
         st.session_state.baselines = {}
         st.session_state.pop('last_test', None)
-        st.session_state.generation = lab.generation
+        st.session_state.generation = generation
     st.session_state.setdefault('snapshots', {})
     st.session_state.setdefault('baselines', {})
     st.sidebar.title('Good-Fences')
-    page = st.sidebar.radio('Navigazione', ['Topologia', 'Test', 'Statistiche'])
+    page = st.sidebar.radio('Navigazione', ['Topologia', 'Test', 'Statistiche', 'QoS'])
+    qos_mode = st.sidebar.radio('QoS iniziale', ['on', 'off'], disabled=lab.status()['running'])
     st.sidebar.caption('Una simulazione condivisa tra le schede del browser. '
                        'La chiusura della scheda lascia il laboratorio attivo.')
     start, stop = st.sidebar.columns(2)
     if start.button('Avvia rete', disabled=lab.status()['running']):
         try:
             with st.spinner('Avvio di Ryu e Mininet…'):
-                lab.start()
+                lab.start(qos_mode=qos_mode)
             st.rerun()
         except (RuntimeError, ValueError, OSError, ConfigValidationError,
                 yaml.YAMLError, subprocess.SubprocessError) as error:
@@ -362,6 +460,8 @@ def main():
         render_topology(model)
     elif page == 'Test':
         render_tests(model, lab)
+    elif page == 'QoS':
+        render_qos(model, lab)
     else:
         render_statistics(model)
 

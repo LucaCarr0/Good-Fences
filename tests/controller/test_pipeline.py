@@ -54,6 +54,8 @@ def traverse(flows, fields, groups=None, bucket_index=0):
         visited.append((table, flow.cookie))
         table = None
         for instruction in flow.instructions:
+            if isinstance(instruction, parser.OFPInstructionMeter):
+                continue  # Il test dei percorsi non simula tempo o token bucket.
             if isinstance(instruction, parser.OFPInstructionGotoTable):
                 assert instruction.table_id > flow.table_id
                 table = instruction.table_id
@@ -180,11 +182,12 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual((bucket.watch_port, bucket.watch_group),
                                  (ofp.OFPP_ANY, ofp.OFPG_ANY))
 
-    def start_controller_installation(self):
+    def start_controller_installation(self, qos=True, meter_reply=True):
         """Crea solo lo stato necessario agli handler, senza avviare Ryu."""
         app = GoodFencesApp.__new__(GoodFencesApp)
         app.model = self.model
         app.datapaths, app.pending, app.ready = {}, {}, set()
+        app.qos_enabled, app.meter_features = qos, {}
         app.expected_dpids, app.logger = {1}, Mock()
         messages = []
         dp = SimpleNamespace(id=1, ofproto=ofp, ofproto_parser=parser,
@@ -193,6 +196,11 @@ class PipelineTests(unittest.TestCase):
         features = SimpleNamespace(msg=SimpleNamespace(datapath=dp, n_tables=3))
         with patch('controller.app.hub.spawn_after'):
             app.switch_features_handler(features)
+            if meter_reply:
+                reply = SimpleNamespace(datapath=dp, xid=messages[-1].xid,
+                    body=[SimpleNamespace(max_meter=1000, max_bands=1, band_types=2,
+                                          capabilities=13)])
+                app.meter_features_reply_handler(SimpleNamespace(msg=reply))
         return app, dp, messages
 
     def acknowledge_barrier(self, app, dp, xid):

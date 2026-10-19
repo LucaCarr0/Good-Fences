@@ -127,6 +127,24 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(order, ['mininet stopped', 'controller stopped'])
         self.assertFalse(self.lab.status()['running'])
 
+    def test_qos_switch_restarts_only_controller_and_waits_for_ready(self):
+        self.ready_lab()
+        controller, network = self.lab.controller, self.lab.network
+        with patch.object(self.lab, '_start_controller') as start, patch.object(self.lab, 'wait_ready') as wait:
+            self.lab.set_qos('off')
+        controller.terminate.assert_called_once_with()
+        network.terminate.assert_not_called()
+        self.assertEqual(self.lab.qos_mode, 'off')
+        start.assert_called_once_with()
+        wait.assert_called_once_with(None)
+
+    def test_only_one_background_experiment_is_allowed(self):
+        self.ready_lab()
+        self.lab.experiment = SimpleNamespace(running=True)
+        with self.assertRaisesRegex(RuntimeError, 'già attivo'):
+            self.lab.start_experiment()
+        self.lab.experiment = None
+
 
 class HeadlessTests(unittest.TestCase):
     def test_headless_publishes_host_pids_and_waits_without_cli(self):
@@ -173,6 +191,9 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(next(button for button in app.button if button.label == 'Avvia test').disabled)
             app.sidebar.radio[0].set_value('Statistiche').run()
             self.assertEqual(list(app.exception), [])
+            app.sidebar.radio[0].set_value('QoS').run()
+            self.assertEqual(list(app.exception), [])
+            self.assertTrue(next(button for button in app.button if button.label == 'Avvia esperimento').disabled)
 
 
 if __name__ == '__main__':

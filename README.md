@@ -10,7 +10,9 @@ anche se ancora attiva. Il controller Ryu resta in esecuzione.
 ## Visualizzatore GUI
 
 La dashboard Streamlit avvia e arresta **Mininet e Ryu**, mostra la topologia,
-invia i casi di `packet_io.py` dagli host e confronta flow e bucket OpenFlow.
+invia i casi di `packet_io.py` dagli host e confronta flow, bucket e meter OpenFlow.
+La pagina QoS esegue prove isolate e confronti noisy neighbor ripetuti, con
+contatori reali, CSV e grafici scaricabili.
 Usa la `.venv` Python 3.9 esistente con dipendenze opzionali:
 
 ```bash
@@ -105,12 +107,15 @@ Dalla fabric si può consegnare solo a host locali: non esiste un percorso
 uplink → uplink. Entrambi gli spine conservano la VLAN e inoltrano sul leaf di
 destinazione, mai sulla porta di ingresso. Spare e ingressi non ammessi ricadono
 nel default DROP a priorità 0. Isolamento, binding sorgente e proxy ARP restano
-invariati. Non sono introdotti meter, NORMAL o FLOOD.
+invariati. Non sono introdotti NORMAL o FLOOD. L'IPv4 ammesso dalle porte host
+usa meter per tenant per leaf; la [guida QoS](docs/qos.md) descrive limiti,
+visualizzatore, esperimenti riproducibili e prove manuali con e senza meter.
 
 La funzione di supporto ECMP è direttamente in `src/controller/pipeline.py`.
 All'avvio e alla riconnessione il controller rimuove i vecchi flow, ripristina i
-DROP e ricrea soltanto il proprio gruppo ECMP. Una prima Barrier conferma questa
-preparazione prima di inviare i flow che usano il gruppo; la Barrier finale
+DROP, verifica le capacità meter e ricrea il proprio gruppo ECMP e i meter
+configurati (con QoS on). Una prima Barrier conferma queste risorse
+prima di inviare i flow dipendenti; la Barrier finale
 conferma l'intera pipeline. Errori OpenFlow o timeout impediscono lo stato READY.
 
 Avvio dalla radice, in due terminali:

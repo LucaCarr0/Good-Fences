@@ -273,6 +273,8 @@ def readable_actions(actions):
             parts.append('Invia a porta ' + action.split(':', 1)[1])
         elif action.startswith('group:'):
             parts.append('Usa gruppo ' + action.split(':', 1)[1])
+        elif action.startswith('meter:'):
+            parts.append('Applica meter ' + action.split(':', 1)[1])
         elif re.fullmatch(r'set_field:\d+->vlan_vid', action):
             value = int(action.split(':')[1].split('->')[0])
             parts.append(f'VLAN {value & 0xfff}')

@@ -79,6 +79,9 @@ class NetworkModel:
         
         for tenant in self.tenants:
             ips = set()
+            if type(tenant.rate_mbps) is not int or not (1 <= tenant.rate_mbps <= 0xffffffff // 1000):
+                raise ConfigValidationError(
+                    f"rate_mbps non valido nel tenant {tenant.name}: richiesto intero positivo rappresentabile in OpenFlow.")
             if type(tenant.tag) is not int:
                 raise ConfigValidationError(f"Tag VLAN mancante o non intero nel tenant {tenant.name}.")
             if not (1 <= tenant.tag <= 4094):

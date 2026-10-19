@@ -16,7 +16,8 @@ reply spontanee e RARP non producono risposte. La reply del proxy
 è untagged e viene inviata soltanto alla porta richiedente, senza flooding.
 
 IPv4 dalle porte host richiede porta, MAC e IP sorgente configurati e assenza di
-VLAN. La tabella 0 applica il tag del modello e passa alla 1. Questa ammette
+VLAN. Con QoS on la tabella 0 applica prima il meter del tenant, poi il tag
+del modello e passa alla 1. Questa ammette
 solo la coppia MAC/IP di destinazione configurata nel tenant della VLAN, poi
 passa alla 2. La tabella 2 toglie il tag e consegna a un host locale, oppure
 inoltra dall'host assegnato dello stesso tenant tramite il gruppo ECMP. Un
@@ -57,7 +58,7 @@ modo tutti e tre i leaf a entrambi gli spine.
 | Leaf/0 | 400 | Porta host, EtherType residuo 0x8100/0x88a8/0x9100 | DROP |
 | Leaf/0 | 350 | Porta assegnata, ARP untagged, SPA zero oppure TPA uguale all'IP configurato | DROP |
 | Leaf/0 | 300 | ARP request untagged, porta e sorgenti Ethernet/ARP del binding | Controller, frame completo |
-| Leaf/0 | 200 | IPv4 untagged, porta/MAC/IP sorgenti del binding | APPLY push VLAN 0x8100, set VLAN tenant; goto 1 |
+| Leaf/0 | 200 | IPv4 untagged, porta/MAC/IP sorgenti del binding | METER tenant (QoS on); APPLY push VLAN 0x8100, set VLAN tenant; goto 1 |
 | Leaf/0 | 200 | Ciascun uplink, IPv4, VLAN nota | goto 1 |
 | Leaf/1 | 300 | ARP | DROP |
 | Leaf/1 | 200 | IPv4, VLAN tenant, MAC/IP di una destinazione del tenant | goto 2 |
@@ -80,13 +81,15 @@ Cookie per leggere i contatori: `0x47460010` default DROP, `0x47460020` VLAN DRO
 La funzione di supporto ECMP resta in `src/controller/pipeline.py`, senza un
 modulo aggiuntivo. All'avvio e alla riconnessione si rimuovono i vecchi flow,
 si ripristinano i default DROP e si elimina/ricrea soltanto il gruppo ECMP del
-leaf. La prima Barrier conferma questa preparazione prima dell'installazione
+leaf. Con QoS on si verificano prima le capacità meter e si preparano anche
+i meter dei tenant locali. La prima Barrier conferma queste risorse prima dell'installazione
 dei flow che richiamano il gruppo. Una seconda Barrier conferma la pipeline
 completa e abilita READY del leaf. Gli spine preparano i DROP e i flow senza
 creare gruppi e attendono la sola Barrier finale. Errori OpenFlow e timeout
 vengono registrati e impediscono
 READY; un errore del gruppo non consente di proseguire con i flow dipendenti.
-Non sono introdotti meter, REST o provisioning dinamico.
+I meter IPv4 di ingresso e la verifica delle capacità sono descritti nella
+[guida QoS](qos.md). Non sono introdotti REST o provisioning dinamico.
 
 ## Avvio e ispezione manuale
 
@@ -118,7 +121,8 @@ sudo ovs-ofctl -O OpenFlow13 dump-group-stats leaf1
 Ripetere per leaf2/leaf3 e spine2. Sono attesi output dati sulle porte host,
 sui bucket verso entrambi gli uplink dei leaf e sulle porte leaf di entrambi gli
 spine. Ogni leaf ha un gruppo SELECT `1`, con bucket di peso uguale e output 5/6;
-gli spine non richiedono gruppi. Non devono esserci NORMAL, FLOOD o meter.
+gli spine non richiedono gruppi. Non devono esserci NORMAL o FLOOD. Con QoS on,
+i soli flow IPv4 host della tabella 0 referenziano i meter del tenant.
 ARP esce solo verso il controller.
 
 Per leggere gli stessi contatori in tabelle interattive, avviare da un terminale

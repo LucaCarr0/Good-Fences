@@ -57,6 +57,12 @@ delta dei bucket. In caso di timeout può essere stato inviato traffico parziale
 
 ## Statistiche e riferimenti
 
+La pagina **QoS** aggiunge test isolato, confronto noisy neighbor ripetuto,
+annullamento e download CSV/grafici/dati grezzi. La vista singolo switch mostra
+anche capacità, configurazione e delta dei meter. La [guida QoS](qos.md)
+descrive budget per tenant per leaf, burst, procedura manuale e validità delle
+misure. La modalità QoS iniziale si sceglie prima di avviare la rete.
+
 La vista rete legge gli switch su richiesta e riporta gli istanti delle letture;
 non è uno snapshot atomico della fabric. Le somme sono passaggi nelle regole,
 anche ripetuti tra tabelle/switch, non pacchetti unici o throughput end-to-end.

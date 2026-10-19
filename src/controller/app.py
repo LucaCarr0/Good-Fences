@@ -1,5 +1,6 @@
 """App Ryu minimale; avviare dalla radice con PYTHONPATH=src."""
 import os
+import uuid
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import (
@@ -9,7 +10,8 @@ from ryu.lib import hub
 from ryu.ofproto import ofproto_v1_3
 from network_models import NetworkModel
 from controller.arp_proxy import build_arp_reply
-from controller.pipeline import base_tables, install_entry_tables, prepare_pipeline
+from controller.pipeline import (base_tables, install_entry_tables, prepare_pipeline,
+                                 prepare_resources, leaf_tenants)
 from runtime_status import write_status
 
 
@@ -27,6 +29,12 @@ class GoodFencesApp(app_manager.RyuApp):
         self.datapaths = {}
         self.ready = set()
         self.pending = {}
+        mode = os.environ.get('GOOD_FENCES_QOS', 'on')
+        if mode not in ('on', 'off'):
+            raise ValueError('GOOD_FENCES_QOS deve essere on oppure off')
+        self.qos_enabled = mode == 'on'
+        self.generation = uuid.uuid4().hex
+        self.meter_features = {}
         self.status_file = os.environ.get('GOOD_FENCES_STATUS_FILE')
         self._publish_status()
         self.logger.info('DPID attesi: %s',
@@ -38,6 +46,9 @@ class GoodFencesApp(app_manager.RyuApp):
             try:
                 write_status(path, {'ready': sorted(self.ready),
                                     'expected': sorted(self.expected_dpids),
+                                    'qos_enabled': self.qos_enabled,
+                                    'generation': self.generation,
+                                    'meter_features': self.meter_features,
                                     'error': error})
             except OSError as failure:
                 self.logger.error('Impossibile pubblicare lo stato GUI: %s', failure)
@@ -69,13 +80,42 @@ class GoodFencesApp(app_manager.RyuApp):
         self.datapaths[dp.id] = dp
         self.ready.discard(dp.id)
         self._publish_status()
-        prepare_pipeline(dp, self.model)
+        prepare_pipeline(dp, self.model, self.qos_enabled, resources=False)
         if self.model.is_leaf(dp.id):
-            self._request_barrier(dp, 'groups')
+            request = dp.ofproto_parser.OFPMeterFeaturesStatsRequest(dp)
+            dp.set_xid(request)
+            self.pending[dp.id] = (dp, request.xid, 'meter-features')
+            dp.send_msg(request)
+            hub.spawn_after(10, self._installation_timeout, dp, request.xid, 'meter-features')
         else:
             install_entry_tables(dp, self.model)
             self._request_barrier(dp, 'flows')
         self.logger.info('Connesso DPID=%016x OpenFlow=1.3; installazione inviata', dp.id)
+
+    @set_ev_cls(ofp_event.EventOFPMeterFeaturesStatsReply, [CONFIG_DISPATCHER, MAIN_DISPATCHER])
+    def meter_features_reply_handler(self, ev):
+        msg, dp = ev.msg, ev.msg.datapath
+        if self.pending.get(dp.id) != (dp, msg.xid, 'meter-features'):
+            return
+        required = dp.ofproto.OFPMF_KBPS | dp.ofproto.OFPMF_BURST | dp.ofproto.OFPMF_STATS
+        features = msg.body[0] if len(msg.body) == 1 else None
+        supported = bool(features and features.max_meter)
+        if self.qos_enabled and (not supported or features.max_bands < 1
+                or not features.band_types & (1 << dp.ofproto.OFPMBT_DROP)
+                or features.capabilities & required != required
+                or features.max_meter < len(leaf_tenants(self.model, dp.id))):
+            self.pending.pop(dp.id, None)
+            error = f'Meter non supportati o capacità insufficienti DPID={dp.id}'
+            self.logger.error(error)
+            self._publish_status(error)
+            dp.close()
+            return
+        self.meter_features[dp.id] = ({name: getattr(features, name) for name in
+                                      ('max_meter', 'max_bands', 'band_types', 'capabilities')}
+                                     if features else {})
+        self.pending.pop(dp.id, None)
+        prepare_resources(dp, self.model, self.qos_enabled, supported)
+        self._request_barrier(dp, 'groups')
 
     def _request_barrier(self, dp, phase):
         """Attende la fase corrente, con lo stesso timeout per gruppi e flow."""
@@ -118,11 +158,12 @@ class GoodFencesApp(app_manager.RyuApp):
     def barrier_reply_handler(self, ev):
         dp = ev.msg.datapath
         pending = self.pending.get(dp.id)
-        if pending is None or pending[:2] != (dp, ev.msg.xid):
+        if (pending is None or pending[:2] != (dp, ev.msg.xid)
+                or pending[2] not in ('groups', 'flows')):
             return
         self.pending.pop(dp.id)
         if pending[2] == 'groups':
-            install_entry_tables(dp, self.model)
+            install_entry_tables(dp, self.model, self.qos_enabled)
             self._request_barrier(dp, 'flows')
             return
         self.ready.add(dp.id)

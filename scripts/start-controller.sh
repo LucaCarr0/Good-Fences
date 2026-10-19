@@ -6,6 +6,7 @@ PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 export PYTHONPATH="$PROJECT_ROOT/src"
+export PYTHONDONTWRITEBYTECODE=1
 
 exec "$PROJECT_ROOT/.venv/bin/ryu-manager" \
   --ofp-tcp-listen-port 6653 \

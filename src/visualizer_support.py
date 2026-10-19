@@ -17,6 +17,7 @@ import time
 import uuid
 
 from src.network_models import NetworkModel
+from src.qos_stats import read_meters
 from tests.network.flow_visualizer import (
     available_switches, bucket_deltas, delta, read_state, readable_actions, readable_match,
 )
@@ -57,11 +58,13 @@ class SwitchSnapshot:
     flows: list
     groups: object
     captured_at: str
+    meters: object = None
 
 
 def read_switch(switch):
     flows, groups = read_state(switch)
-    return SwitchSnapshot(flows, groups, datetime.now().astimezone().isoformat(timespec='seconds'))
+    return SwitchSnapshot(flows, groups, datetime.now().astimezone().isoformat(timespec='seconds'),
+                          read_meters(switch))
 
 
 def flow_rows(snapshot, baseline=None):
@@ -128,6 +131,9 @@ class ManagedLab:
         self.network = self.controller = None
         self.generation = None
         self.started_at = None
+        self.qos_mode = os.environ.get('GOOD_FENCES_QOS', 'on')
+        self.experiment = None
+        self.switch_prefix = ''
         self._lock = threading.RLock()
         atexit.register(self.close)
 
@@ -153,6 +159,8 @@ class ManagedLab:
                     'expected_count': len(expected), 'error': controller.get('error'),
                     'hosts': network.get('hosts', {}) if network_alive else {},
                     'started_at': self.started_at,
+                    'qos_enabled': controller.get('qos_enabled'),
+                    'controller_generation': controller.get('generation'),
                     'network_exit': self.network.poll() if self.network else None,
                     'controller_exit': self.controller.poll() if self.controller else None}
 
@@ -161,7 +169,84 @@ class ManagedLab:
             return subprocess.Popen(command, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
                                     stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
 
-    def start(self):
+    def _start_controller(self):
+        (self.path / 'controller.json').unlink(missing_ok=True)
+        environment = dict(os.environ, PYTHONPATH=str(ROOT / 'src'),
+                           PYTHONDONTWRITEBYTECODE='1',
+                           GOOD_FENCES_QOS=self.qos_mode,
+                           GOOD_FENCES_STATUS_FILE=str(self.path / 'controller.json'))
+        self.controller = self._spawn(
+            ['bash', str(ROOT / 'scripts/start-controller.sh')], 'controller.log', environment)
+        deadline = time.monotonic() + 10
+        while True:
+            if self.controller.poll() is not None:
+                raise RuntimeError('Ryu non si è avviato. Consultare il log del controller.')
+            try:
+                with socket.create_connection(('127.0.0.1', 6653), timeout=0.2):
+                    return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Ryu non apre la porta 6653 entro 10 secondi.')
+                time.sleep(0.1)
+
+    def wait_ready(self, cancel=None, timeout=40):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError('Esperimento annullato.')
+            state = self.status()
+            if state['ready']:
+                return
+            if state['error'] or not state['running']:
+                raise RuntimeError(state['error'] or 'Laboratorio fermo.')
+            time.sleep(0.1)
+        raise RuntimeError('Timeout in attesa di tutti gli switch READY.')
+
+    def set_qos(self, mode, cancel=None):
+        if mode not in ('on', 'off'):
+            raise ValueError('Modalità QoS non valida.')
+        with self._lock:
+            if not self.status()['network_alive']:
+                raise RuntimeError('Mininet non è attivo.')
+            if self.controller is not None and self.controller.poll() is None:
+                self.controller.terminate()
+                try:
+                    self.controller.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.controller.kill()
+                    self.controller.wait(timeout=5)
+            self.qos_mode = mode
+            self._start_controller()
+        self.wait_ready(cancel)
+
+    def start_experiment(self, **options):
+        from src.qos_experiment import Experiment
+        with self._lock:
+            if self.experiment and self.experiment.running:
+                raise RuntimeError('Un esperimento è già attivo.')
+            if not self.status()['ready']:
+                raise RuntimeError('Attendere tutti gli switch READY.')
+            experiment = Experiment(self, **options)
+            self.experiment = experiment
+            experiment.start()
+            return experiment
+
+    def host_command(self, host):
+        status = self.status()
+        if not status['ready']:
+            raise RuntimeError('Attendere tutti gli switch READY.')
+        pid = status['hosts'].get(host)
+        if not isinstance(pid, int) or pid <= 0:
+            raise ValueError('Host non presente nella simulazione gestita.')
+        try:
+            arguments = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        except OSError as error:
+            raise RuntimeError('Namespace host non disponibile.') from error
+        if f'mininet:{host}'.encode() not in arguments:
+            raise RuntimeError('Il PID non identifica più l’host Mininet selezionato.')
+        return ['mnexec', '-a', str(pid)]
+
+    def start(self, qos_mode=None):
         with self._lock:
             if os.geteuid() != 0:
                 raise RuntimeError('Avviare con bash scripts/start-visualizer.sh per gestire Mininet.')
@@ -178,26 +263,16 @@ class ManagedLab:
                 except OSError as error:
                     raise RuntimeError('Porta 6653 occupata: arrestare il controller esterno.') from error
             load_model()  # Validare prima di creare processi o interfacce.
+            if qos_mode is not None:
+                if qos_mode not in ('on', 'off'):
+                    raise ValueError('Modalità QoS non valida.')
+                self.qos_mode = qos_mode
             for name in ('network.json', 'controller.json'):
                 (self.path / name).unlink(missing_ok=True)
             self.generation = uuid.uuid4().hex
             self.started_at = time.monotonic()
-            environment = dict(os.environ, PYTHONPATH=str(ROOT / 'src'),
-                               GOOD_FENCES_STATUS_FILE=str(self.path / 'controller.json'))
             try:
-                self.controller = self._spawn(
-                    ['bash', str(ROOT / 'scripts/start-controller.sh')], 'controller.log', environment)
-                deadline = time.monotonic() + 10
-                while True:
-                    if self.controller.poll() is not None:
-                        raise RuntimeError('Ryu non si è avviato. Consultare il log del controller.')
-                    try:
-                        with socket.create_connection(('127.0.0.1', 6653), timeout=0.2):
-                            break
-                    except OSError:
-                        if time.monotonic() >= deadline:
-                            raise RuntimeError('Ryu non apre la porta 6653 entro 10 secondi.')
-                        time.sleep(0.1)
+                self._start_controller()
                 self.network = self._spawn(
                     [sys.executable, '-u', str(ROOT / 'src/datacenter.py'),
                      '--controller', 'remote', '--headless',
@@ -207,6 +282,12 @@ class ManagedLab:
                 raise
 
     def stop(self):
+        job = self.experiment
+        if job and job.running and threading.current_thread() is not job.thread:
+            job.cancel.set()
+            job.thread.join(timeout=55)
+            if job.running:
+                raise RuntimeError('Esperimento ancora in arresto: attendere e riprovare.')
         with self._lock:
             errors = []
             for process in (self.network, self.controller):
@@ -245,6 +326,8 @@ class ManagedLab:
 
     def run_test(self, host, case, **options):
         with self._lock:
+            if self.experiment and self.experiment.running:
+                raise RuntimeError('Attendere la fine dell’esperimento QoS prima di inviare altri pacchetti.')
             status = self.status()
             if not status['ready']:
                 raise RuntimeError('Attendere che tutti gli switch siano READY prima del test.')
