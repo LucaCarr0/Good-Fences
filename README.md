@@ -7,14 +7,27 @@ i bridge leafN/spineN e le relative interfacce. Questi nomi sono riservati
 a Good-Fences: una nuova esecuzione sostituisce la simulazione precedente,
 anche se ancora attiva. Il controller Ryu resta in esecuzione.
 
+## Dipendenze
+
+Il progetto usa una `.venv` Python 3.9. Tutte le dipendenze Python, comprese
+quelle della GUI e delle utility di test, sono raccolte in `requirements.txt`.
+Installarle dalla radice del progetto:
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+La simulazione richiede Linux, Mininet e Open vSwitch in esecuzione.
+Per **Apri shell** dalla GUI serve anche xterm con una sessione grafica locale.
+Gli strumenti di sistema non vengono installati da `requirements.txt`.
+
 ## Visualizzatore GUI
 
 La dashboard Streamlit avvia e arresta **Mininet e Ryu**, mostra la topologia,
 invia i casi di `packet_io.py` dagli host e confronta flow e bucket OpenFlow.
-Usa la `.venv` Python 3.9 esistente con dipendenze opzionali:
+Dopo aver installato le dipendenze:
 
 ```bash
-.venv/bin/python -m pip install -r requirements-visualizer.txt
 bash scripts/start-visualizer.sh
 ```
 
@@ -134,17 +147,13 @@ sudo ovs-ofctl -O OpenFlow13 dump-group-stats leaf1
 La [procedura manuale della pipeline](docs/pipeline.md) riporta matrice delle regole,
 trace, lettura dei contatori, comandi dalla CLI Mininet per frame falsificati,
 catture ARP e riconnessione. Include i comandi dell'utility
-`tests/network/packet_io.py` per aggiungere ARP Probe, Gratuitous ARP, RARP,
-IPv4 tagged e untagged ai test manuali degli sprint precedenti, con ascolto sul
+`tests/network/packet_io.py` per verificare ARP Probe, Gratuitous ARP, RARP,
+IPv4 tagged e untagged, con ascolto sul
 destinatario e casi di isolamento. Negli attacchi con IP sovrapposti va indicato
 il MAC della vittima: il solo IP risolve un host del tenant della sorgente.
-La procedura riporta risultati attesi e, in fondo, le verifiche eseguite.
+La procedura riporta risultati attesi e, in fondo, i test automatici delle utility.
 
-L'utility usa Scapy, incluso in `requirements.txt`. Per installarlo nella `.venv`:
-
-```bash
-.venv/bin/python -m pip install 'scapy>=2.6,<3'
-```
+L'utility usa Scapy, incluso nell'installazione da `requirements.txt`.
 
 Con controller e rete avviati, dopo `ALL SWITCHES READY: 5/5`, dalla CLI Mininet:
 
@@ -290,6 +299,18 @@ necessariamente attraversare entrambi gli spine.
 
 `--listen` continua a catturare soltanto IPv4 con protocollo 253: non è il
 listener per il traffico UDP di `ecmp-udp`. La distribuzione si verifica dai
-bucket, la consegna e l'isolamento con le prove IPv4/ARP precedenti. Non viene
-aggiunto `test_ecmp.py`; i test automatici esistenti verificano la configurazione
-e le regressioni. La tolleranza ai guasti degli uplink richiede un lavoro separato.
+bucket, la consegna e l'isolamento con le prove IPv4/ARP precedenti.
+La tolleranza ai guasti degli uplink richiede un lavoro separato.
+
+### Test automatici delle utility
+
+I test in `tests/network` verificano costruzione e cattura dei pacchetti,
+generazione delle tuple UDP e parsing e confronto dei contatori OpenFlow.
+Si eseguono senza avviare la rete:
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests/network -v
+```
+
+La pipeline del controller e il funzionamento completo della GUI si verificano
+manualmente con le procedure documentate.

@@ -8,6 +8,8 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -74,7 +76,7 @@ def flow_rows(snapshot, baseline=None):
                      'Pacchetti': flow.packets, 'Byte': flow.byte_count,
                      'Delta pkt': packets if isinstance(packets, int) else None,
                      'Delta byte': byte_count if isinstance(byte_count, int) else None,
-                     'Confronto': 'valido' if isinstance(packets, int) else packets,
+                     'Stato delta': 'valido' if isinstance(packets, int) else packets,
                      'Match': readable_match(flow), 'Azioni': readable_actions(flow.actions),
                      'OVS originale': flow.raw})
     return rows
@@ -200,7 +202,7 @@ class ManagedLab:
                         time.sleep(0.1)
                 self.network = self._spawn(
                     [sys.executable, '-u', str(ROOT / 'src/datacenter.py'),
-                     '--controller', 'remote', '--headless',
+                     '--controller', 'remote', '--headless', '--local-cli',
                      '--state-file', str(self.path / 'network.json')], 'network.log')
             except Exception:
                 self.stop()
@@ -242,6 +244,19 @@ class ManagedLab:
                 return source.read().decode('utf-8', errors='replace')
         except FileNotFoundError:
             return 'Nessun log disponibile.'
+
+    def open_shell(self):
+        with self._lock:
+            status = self.status()
+            if not status['ready']:
+                raise RuntimeError('La simulazione non è pronta.')
+            if '--local-cli' not in self.network.args:
+                raise RuntimeError('Arresta e riavvia la rete per abilitare la CLI Mininet.')
+            if not shutil.which('xterm'):
+                raise RuntimeError('Installare xterm per aprire la shell Mininet.')
+            if not os.environ.get('DISPLAY'):
+                raise RuntimeError('Display locale non disponibile: riavviare il visualizer con lo script.')
+            self.network.send_signal(signal.SIGUSR1)
 
     def run_test(self, host, case, **options):
         with self._lock:

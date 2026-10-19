@@ -3,10 +3,11 @@
 ## Avvio e arresto
 
 Prerequisiti: Linux, Mininet, Open vSwitch in esecuzione e la `.venv` del progetto.
-Le dipendenze GUI sono opzionali e compatibili con Python 3.9:
+Tutte le dipendenze Python, incluse quelle della GUI, sono raccolte in
+`requirements.txt` e usano la `.venv` Python 3.9:
 
 ```bash
-.venv/bin/python -m pip install -r requirements-visualizer.txt
+.venv/bin/python -m pip install -r requirements.txt
 bash scripts/start-visualizer.sh
 ```
 
@@ -24,6 +25,14 @@ con nomi riservati Good-Fences, quindi non usarlo su una rete da preservare.
 **Arresta rete** arresta prima Mininet e poi Ryu. La simulazione è condivisa tra
 le schede dello stesso server; chiudere una scheda non arresta la rete. Arrestare
 la rete dalla GUI prima di terminare il server Streamlit con `Ctrl+C`.
+
+**Apri shell**, nella barra laterale sotto i pulsanti della rete, apre un terminale
+xterm locale con la CLI `mininet>` collegata alla rete già attiva. Non richiede
+la selezione di un host: sono disponibili `nodes`, `links`, `pingall` e comandi
+come `h2 ping h6`. Serve una rete READY e una sessione grafica locale.
+`exit`, `Ctrl+D` o la chiusura della finestra chiudono solo la shell; **Arresta rete**
+ferma anche la simulazione. Riavviare una rete già attiva prima dell'aggiornamento
+per abilitare la CLI.
 
 ## Topologia
 
@@ -63,6 +72,11 @@ anche ripetuti tra tabelle/switch, non pacchetti unici o throughput end-to-end.
 La vista singolo switch filtra per tabella, categoria, match, azioni e presenza
 di pacchetti. I grafici rispettano i filtri.
 
+Match e azioni sono visualizzati per intero, con testo a capo e righe ad altezza
+automatica, anche per le azioni dei bucket ECMP. La tabella delle regole scorre
+verticalmente. **Colonne aggiuntive** permette di mostrare singolarmente **Byte**,
+**Delta pkt**, **Delta byte** e **Stato delta**, inizialmente nascosti.
+
 1. Scegliere lo switch e premere **Salva riferimento prima del test**.
 2. Eseguire il caso nella pagina **Test**.
 3. Tornare allo switch e premere **Aggiorna statistiche**.
@@ -72,8 +86,11 @@ La prima lettura crea un riferimento iniziale. I riferimenti sono separati per
 switch e conservati passando tra viste nella stessa sessione browser. Ogni nuovo
 avvio invalida i dati della simulazione precedente.
 
-`nuova` e `reset` distinguono regole assenti nel riferimento e contatori
-diminuiti/reinstallati. I delta non validi rimangono vuoti, non zero. Le quote dei
+**Stato delta** (in precedenza **Confronto**) indica la validità della differenza
+rispetto al riferimento salvato: `valido` significa che i delta sono calcolabili;
+`nuova` indica una regola assente nel riferimento; `reset` segnala durata o contatori
+diminuiti, per esempio dopo una reinstallazione. I delta non validi sono indicati
+con —, non zero. Le quote dei
 bucket usano la somma dei delta del gruppo; non vengono calcolate con contatori
 mancanti, gruppo modificato o incremento nullo. Pesi uguali non garantiscono
 50/50. Gli errori dei gruppi non nascondono i flow disponibili.
@@ -92,14 +109,13 @@ temporanea privata. Il controller pubblica READY dopo le Barrier già esistenti
 e aggiorna lo stato su errori, timeout e disconnessioni. Senza la variabile
 `GOOD_FENCES_STATUS_FILE` il funzionamento CLI resta invariato.
 
-Test automatici senza avviare la rete:
+I test automatici delle utility di rete si eseguono senza avviare la simulazione:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests/controller -v
 .venv/bin/python -B -m unittest discover -s tests/network -v
-PYTHONPATH=src:. .venv/bin/python -B -m unittest discover -s tests/visualizer -v
 ```
 
-I test GUI verificano navigazione, valori proposti, porte, PID, stato READY,
-arresto e contatori con processi/socket simulati. La prova completa con
-Mininet/OVS va effettuata dall'interfaccia.
+Questi test coprono generazione e cattura dei pacchetti, parsing e confronto
+dei contatori OpenFlow. La GUI va verificata manualmente dall'interfaccia con
+Mininet/OVS: avvio e stato READY, topologia, invio dei casi, lettura delle
+statistiche, apertura della shell e arresto della simulazione.

@@ -22,6 +22,34 @@ from src.network_models import ConfigValidationError
 st.set_page_config(page_title='Good-Fences Visualizer', page_icon='🕸️', layout='wide')
 
 
+DELTA_HELP = ('Validità dei delta rispetto al riferimento salvato: valido = differenza '
+              'calcolabile; nuova = regola assente nel riferimento; reset = durata o '
+              'contatori diminuiti, per esempio dopo una reinstallazione. '
+              'I delta non validi sono indicati con —.')
+
+
+def readable_statistics_table(rows, text_columns):
+    """Tabella con righe ad altezza automatica e testo completo a capo."""
+    data = pd.DataFrame(rows)
+    formats = {column: '{:,.0f}' for column in data.select_dtypes(include='number').columns}
+    if 'Quota pkt (%)' in data:
+        formats['Quota pkt (%)'] = '{:.1f}'
+    # Riserva più spazio ai testi senza imporre una larghezza minima alla pagina.
+    units = len(data.columns) + 3 * len(text_columns)
+    styled = data.style.format(formats, na_rep='—').set_table_styles([
+        {'selector': '', 'props': [('width', '100%'), ('table-layout', 'fixed')]},
+        {'selector': 'th', 'props': [('text-align', 'left'), ('white-space', 'normal')]},
+        {'selector': 'th.row_heading, th.blank', 'props': [('display', 'none')]},
+    ]).set_properties(**{'white-space': 'normal', 'overflow-wrap': 'anywhere',
+                         'vertical-align': 'top'})
+    for index, column in enumerate(data.columns):
+        weight = 4 if column in text_columns else 1
+        styled = styled.set_table_styles([
+            {'selector': f'th.col{index}', 'props': [('width', f'{100 * weight / units}%')]},
+        ], overwrite=False)
+    st.table(styled)
+
+
 @st.cache_resource
 def managed_lab():
     return ManagedLab()
@@ -63,6 +91,12 @@ def render_switch(switch, prefix):
                                 key=f'{prefix}_categories')
     query = st.text_input('Filtra match o azioni (porta, IP, MAC, VLAN)', key=f'{prefix}_query')
     active = st.checkbox('Solo regole con pacchetti', key=f'{prefix}_active')
+    optional_columns = ['Byte', 'Delta pkt', 'Delta byte', 'Stato delta']
+    shown = st.multiselect('Colonne aggiuntive', optional_columns,
+                           key=f'{prefix}_flow_columns',
+                           help='Scegli i contatori e lo stato dei delta da mostrare. ' + DELTA_HELP)
+    if 'Stato delta' in shown:
+        st.caption(DELTA_HELP)
     filtered = [row for row in rows
                 if (not tables or row['Tabella'] in tables)
                 and (not categories or row['Regola'] in categories)
@@ -72,11 +106,15 @@ def render_switch(switch, prefix):
         summary = pd.DataFrame(summarize_flows(filtered))
         summary['Tabella / regola'] = summary['Tabella'].astype(str) + ' · ' + summary['Regola']
         st.bar_chart(summary.set_index('Tabella / regola')[['Pacchetti']])
-        st.dataframe(pd.DataFrame(filtered).drop(columns=['OVS originale']), hide_index=True,
-                     use_container_width=True)
+        columns = [column for column in filtered[0]
+                   if column != 'OVS originale' and (column not in optional_columns or column in shown)]
+        with st.container(height=600, border=False):
+            readable_statistics_table([{column: row[column] for column in columns} for row in filtered],
+                                      ['Match', 'Azioni'])
         detail = st.selectbox('Dettaglio regola', filtered, key=f'{prefix}_detail',
                               format_func=lambda row: f'{row["ID"]} · tabella {row["Tabella"]} · {row["Regola"]}')
-        st.code(detail['OVS originale'], language='text')
+        with st.expander('Regola OVS originale'):
+            st.code(detail['OVS originale'], language='text', wrap_lines=True)
     else:
         st.info('Nessuna regola corrisponde ai filtri.')
 
@@ -91,7 +129,8 @@ def render_switch(switch, prefix):
         buckets, notices = group_rows(snapshot, reference)
         for notice in notices:
             st.info(notice)
-        st.dataframe(pd.DataFrame(buckets), hide_index=True, use_container_width=True)
+        if buckets:
+            readable_statistics_table(buckets, ['Azioni'])
         measured = [row for row in buckets if row['Quota pkt (%)'] is not None]
         if measured:
             chart = pd.DataFrame(measured)
@@ -346,6 +385,7 @@ def main():
             st.rerun()
         except (RuntimeError, OSError, subprocess.SubprocessError) as error:
             st.error(str(error))
+    shell_controls = st.sidebar.container()
     with st.sidebar:
         render_lab_status(lab)
         st.button('Aggiorna pagina')
@@ -358,6 +398,15 @@ def main():
     except (ConfigValidationError, yaml.YAMLError, TypeError, KeyError, ValueError, OSError) as error:
         st.error(f'Configurazione non valida: {error}')
         return
+    with shell_controls:
+        if st.button('Apri shell', disabled=not lab.status()['ready'],
+                     help='Apre la CLI Mininet della rete attiva in un terminale locale: '
+                          'nodes, links, pingall, h2 ping h6. exit chiude solo la shell.'):
+            try:
+                lab.open_shell()
+                st.success('Apertura della shell Mininet…')
+            except (RuntimeError, ValueError, OSError) as error:
+                st.error(str(error))
     if page == 'Topologia':
         render_topology(model)
     elif page == 'Test':

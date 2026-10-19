@@ -100,8 +100,8 @@ bash scripts/start-network.sh
 Il primo script conserva `PYTHONPATH=src` tramite il percorso assoluto al modulo.
 Attendere `ALL SWITCHES READY: 5/5`. Gli script conservano la pulizia precedente
 prevista dal progetto. I comandi seguenti sono verifiche manuali di approfondimento.
-L'utility `tests/network/packet_io.py` semplifica invio e cattura dei frame,
-da affiancare alle verifiche degli sprint precedenti. Non esegue
+L'utility `tests/network/packet_io.py` semplifica invio e cattura dei frame.
+Non esegue
 asserzioni automatiche: i risultati descritti qui vanno verificati manualmente.
 
 Dal terminale Linux (oppure anteporre `sh` dalla CLI Mininet):
@@ -134,10 +134,11 @@ complete sono nel [README](../README.md#visualizzatore-dei-contatori-leafspine).
 
 ## Utility per i pacchetti dei test manuali
 
-L'utility richiede Scapy, incluso in `requirements.txt`. Se manca nella `.venv`:
+L'utility richiede Scapy, incluso insieme alle altre dipendenze Python in
+`requirements.txt`. Installare le dipendenze nella `.venv` Python 3.9:
 
 ```bash
-.venv/bin/python -m pip install 'scapy>=2.6,<3'
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 Dalla CLI Mininet, avviata dalla radice del progetto, eseguire un caso alla volta:
@@ -196,8 +197,8 @@ h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case arp-reques
 ```
 
 Atteso: una reply untagged con MAC di h6 (`00:00:00:00:00:06`) e incremento
-della regola ARP-controller, cookie `0x47460030`. Restano da ripetere i casi dello
-sprint precedente nel README e nella sezione sulle regressioni ARP qui sotto.
+della regola ARP-controller, cookie `0x47460030`. Ripetere anche i casi nel
+README e nella sezione sulle regressioni ARP qui sotto.
 
 Per estendere l'utility aggiungere il nome del caso a `CASES` e la costruzione
 del frame in `build_packet`. Non occorrono nuovi file o classi di test.
@@ -478,8 +479,8 @@ sono `dst Ethernet | src Ethernet | 0806 | 0001 0800 06 04 | opcode | SHA | SPA 
 Per gratuitous reply cambiare insieme opcode e TPA: resta DROP a priorità 350.
 Leggere la cattura con `h2 cat /tmp/good-fences-h2-arp.log`. Per i casi negativi
 non deve esserci una reply del proxy. Il proxy non esegue una validazione completa
-di `hwtype`, `proto`, `hlen` e `plen`: questi casi malformati non fanno parte
-dei cinque nuovi test richiesti.
+di `hwtype`, `proto`, `hlen` e `plen`: questi casi malformati non sono inclusi
+nelle verifiche manuali descritte.
 
 ## Riconnessione
 
@@ -494,42 +495,16 @@ Le vecchie eccezioni ARP non devono restare. Registrare separatamente ciò che �
 stato osservato: queste procedure
 descrivono risultati attesi e non attestano un'esecuzione live dei test.
 
-## Verifiche automatiche ECMP
+## Test automatici delle utility
 
-Il 15 ottobre 2026 sono passati 38 test: 9 sulla pipeline e sul ciclo di
-installazione del controller, 22 sul visualizzatore e 7 sull'utility pacchetti.
-Le verifiche coprono entrambi i percorsi, le regressioni di isolamento e ARP,
-l'ordine gruppi/flow, errori e timeout nelle due fasi, parsing dei bucket e
-generazione di tuple UDP diverse. Non è stato aggiunto `test_ecmp.py`.
-
-Per ripeterli:
+I test presenti in `tests/network/test_packet_io.py` e
+`tests/network/test_flow_visualizer.py` verificano costruzione e cattura dei
+pacchetti, generazione di tuple UDP diverse, parsing dei flow e dei bucket
+e confronto dei contatori. Si eseguono senza avviare la rete:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests/controller -v
 .venv/bin/python -B -m unittest discover -s tests/network -v
 ```
 
-La distribuzione effettiva su OVS e le regressioni sulla rete restano da
-verificare manualmente con la procedura precedente.
-
-## Verifiche storiche dello sprint 1.3
-
-I risultati seguenti si riferiscono alla pipeline precedente, con solo spine1
-attivo; non attestano un'esecuzione o il bilanciamento ECMP della versione attuale.
-
-Nello sprint 1.3 passavano i 17 test locali di pipeline e utility. Le prove
-usavano il parser Ryu reale e serializzavano le regole per tutti i cinque DPID;
-verificavano anche la consegna sullo stesso leaf con due host dello stesso tenant,
-usando un modello in memoria.
-Il 14 ottobre 2026 è stata eseguita anche una verifica su Mininet/OVS con una
-rete temporanea e controller separato. Sono riusciti i ping h1→h5/h9,
-h2→h6/h10 e h3→h7/h11; h1→h10 è rimasto senza risoluzione ARP.
-Il frame sperimentale h2→h6 è arrivato untagged soltanto a h6.
-Le catture su h5/h6 non hanno ricevuto frame negli attacchi h1→h6
-(MAC vittima `00:00:00:00:00:06`) e h2→h5 (MAC vittima
-`00:00:00:00:00:05`), né con IP/MAC destinazione incoerenti, sorgenti
-falsificate, VLAN dalla porta host o invio dalla porta spare.
-Allora i trace hanno confermato DROP per uplink→uplink, secondo uplink, ritorno
-sullo spine verso il leaf di ingresso e spine2. Oggi secondo uplink e spine2
-sono attivi: quei due DROP non sono più risultati attesi. Tutti i cinque switch
-erano ready, senza errori OpenFlow; rete e controller temporanei sono stati fermati.
+La pipeline del controller, la distribuzione effettiva su OVS e le regressioni
+sulla rete si verificano manualmente con le procedure precedenti.

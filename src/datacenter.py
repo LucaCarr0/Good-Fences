@@ -1,5 +1,13 @@
 import argparse
+from contextlib import suppress
+import fcntl
+import os
+import pwd
+import select
 import signal
+import subprocess
+import sys
+import termios
 import threading
 from mininet.topo import Topo
 from mininet.net import Mininet
@@ -75,6 +83,73 @@ def create_network(controller_mode, controller_ip, controller_port):
     return net
 
 
+def open_local_cli(net, stopped):
+    """Collega la CLI della rete esistente a una finestra xterm."""
+    class ConsoleClosed(BaseException):
+        pass
+
+    def close_console(signum, frame):
+        if signum == signal.SIGTERM:
+            stopped.set()
+        raise ConsoleClosed()
+
+    master, slave = os.openpty()
+    saved = [os.dup(fd) for fd in range(3)]
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    desktop = pwd.getpwuid(int(os.environ.get('SUDO_UID', os.getuid())))
+    environment = dict(os.environ, HOME=desktop.pw_dir, USER=desktop.pw_name, LOGNAME=desktop.pw_name)
+    credentials = ({'user': desktop.pw_uid, 'group': desktop.pw_gid, 'extra_groups': []}
+                   if os.geteuid() == 0 else {})
+    terminal = None
+    try:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, close_console)
+        signal.signal(signal.SIGHUP, close_console)
+        terminal = subprocess.Popen(
+            ['xterm', '-title', 'Good-Fences · Mininet', '-geometry', '110x32',
+             f'-S{os.ttyname(slave)}/{master}'],
+            pass_fds=(master,), start_new_session=True, env=environment, **credentials)
+        if not select.select([slave], [], [], 5)[0]:
+            raise RuntimeError('xterm non apre la finestra: controllare DISPLAY e i permessi del desktop.')
+        os.read(slave, 80)  # ID della finestra inviato da xterm prima del prompt.
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        for fd in range(3):
+            os.dup2(slave, fd)
+        os.close(master)
+        master = None
+        CLI(net, stdin=sys.stdin)
+    except (ConsoleClosed, KeyboardInterrupt):
+        pass
+    finally:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        for stream in (sys.stdout, sys.stderr):
+            with suppress(OSError):
+                stream.flush()
+        for fd, original in enumerate(saved):
+            os.dup2(original, fd)
+            os.close(original)
+        with suppress(OSError):
+            fcntl.ioctl(slave, termios.TIOCNOTTY, 0)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+        if terminal is not None:
+            if terminal.poll() is None:
+                terminal.terminate()
+            try:
+                terminal.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                terminal.kill()
+                terminal.wait()
+        if master is not None:
+            os.close(master)
+        os.close(slave)
+        for node in net.values():
+            if node.waiting:
+                node.sendInt()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Good Fences - Spine-Leaf Topology")
     parser.add_argument('--controller', choices=['remote', 'none'], default='none', help='Tipo di controller (remote o none)')
@@ -85,11 +160,14 @@ def main():
     parser.add_argument('--headless', action='store_true',
                         help='Mantiene la rete attiva senza CLI fino a SIGTERM/SIGINT')
     parser.add_argument('--state-file', help='Snapshot JSON degli host per la GUI')
+    parser.add_argument('--local-cli', action='store_true', help='Abilita la CLI locale su richiesta della GUI')
     args = parser.parse_args()
     if args.headless and (args.cli or args.test_none):
         parser.error('--headless non è compatibile con --cli o --test-none')
     if args.state_file and not args.headless:
         parser.error('--state-file richiede --headless')
+    if args.local_cli and not args.headless:
+        parser.error('--local-cli richiede --headless')
 
     setLogLevel('info')
     info('*** Inizializzazione della rete...\n')
@@ -99,6 +177,22 @@ def main():
     if args.headless:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda signum, frame: stopped.set())
+    if args.local_cli:
+        console_open = False
+
+        def open_console(signum, frame):
+            nonlocal console_open
+            if console_open:
+                return
+            console_open = True
+            try:
+                open_local_cli(net, stopped)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                info(f'*** Shell Mininet: {error}\n')
+            finally:
+                console_open = False
+
+        signal.signal(signal.SIGUSR1, open_console)
     try:
         run_network(net, args, stopped)
     finally:
