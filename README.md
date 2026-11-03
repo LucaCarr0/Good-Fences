@@ -200,7 +200,7 @@ python3.9 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 ```
 ```bash
-.venv/bin/python -m pip install "setuptools==67.6.1" wheel
+.venv/bin/python -m pip install "setuptools==67.6.1" wheel "pbr==5.11.1"
 ```
 
 ```bash
