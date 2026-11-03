@@ -164,20 +164,6 @@ docs/                    # documentazione di dettaglio
 
 È necessario un host Linux con Docker Engine e Docker Compose v2 installati e funzionanti.
 
-Per verificare l'installazione:
-
-```bash
-docker --version
-```
-
-```bash
-docker compose version
-```
-
-```bash
-docker info
-```
-
 ```bash
 git clone https://github.com/LucaCarr0/Good-Fences.git
 ```
