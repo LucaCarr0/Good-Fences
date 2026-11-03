@@ -207,7 +207,7 @@ python3.9 -m venv .venv
 ```
 
 ```bash
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --no-build-isolation -r requirements.txt
 ```
 
 `requirements.txt` contiene tutte le dipendenze Python: Ryu, Mininet (API
