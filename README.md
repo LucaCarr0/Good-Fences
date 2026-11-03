@@ -197,8 +197,13 @@ cd Good-Fences
 python3.9 -m venv .venv
 ```
 
+
+
 ```bash
 .venv/bin/python -m pip install --upgrade pip
+```
+```bash
+.venv/bin/python -m pip install "setuptools==67.6.1" wheel
 ```
 
 ```bash
