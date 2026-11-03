@@ -3,9 +3,7 @@
 **Isolamento multi-tenant in un data center spine-leaf con SDN**
 (Mininet + Open vSwitch + controller Ryu, OpenFlow 1.3).
 
-Progetto per il corso di NCIS. Il nome viene dal proverbio *"good fences make
-good neighbours"*: i tenant condividono la stessa infrastruttura fisica, ma
-ognuno resta dentro il proprio recinto.
+Progetto per il corso di NCIS. 
 
 ## Autori
 
@@ -36,12 +34,12 @@ ognuno resta dentro il proprio recinto.
 
 In un data center multi-tenant più clienti (*tenant*) condividono gli stessi
 switch e gli stessi collegamenti. Ogni tenant sceglie liberamente il proprio
-piano di indirizzamento, quindi due tenant possono usare **la stessa subnet e
-perfino gli stessi indirizzi IP**. La rete deve comunque garantire che il
+piano di indirizzamento, quindi due tenant possono usare la stessa subnet e
+perfino gli stessi indirizzi IP. La rete deve comunque garantire che il
 traffico di un tenant non raggiunga mai gli host di un altro, anche quando un
 host prova a falsificare MAC, IP o tag VLAN.
 
-Good-Fences simula una fabric **spine-leaf** con Mininet e affida tutte le
+Good-Fences simula una fabric spine-leaf con Mininet e affida tutte le
 decisioni di inoltro a un controller SDN Ryu, che installa una pipeline
 OpenFlow 1.3 statica e isolata per tenant, ricavata da due file YAML.
 
@@ -58,16 +56,15 @@ OpenFlow 1.3 statica e isolata per tenant, ricavata da due file YAML.
   solo per destinazioni dello stesso tenant. Nessun broadcast ARP attraversa la
   fabric.
 - **Default deny**: switch in `failMode=secure` e regola table-miss DROP su ogni
-  tabella; porte libere (*spare*) e ingressi sconosciuti non inoltrano nulla.
+  tabella; porte libere (spare) e ingressi sconosciuti non inoltrano nulla.
 - **Bilanciamento ECMP**: ogni leaf distribuisce il traffico remoto su tutti gli
   spine con un gruppo OpenFlow SELECT.
 - **Osservabilità**: una GUI web mostra topologia, permette di lanciare i casi
   di test dagli host e confronta i contatori OpenFlow prima e dopo ogni prova.
 
-Limiti noti: il forwarding è statico (nessun apprendimento dinamico), i tenant
+Prospettive future: Ad oggi il forwarding è statico (nessun apprendimento dinamico), i tenant
 si caricano solo all'avvio, il campo `rate_mbps` dei tenant non è ancora
-applicato (nessun meter/QoS) e non c'è failover in caso di guasto di un uplink.
-IPv6 è disabilitato sugli host.
+applicato (nessun meter/QoS).Infine, IPv6 è disabilitato sugli host.
 
 ## Topologia di riferimento
 
