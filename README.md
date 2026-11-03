@@ -1,316 +1,537 @@
 # Good-Fences
-Progetto per il corso di NCIS
 
-Lo script `scripts/start-network.sh` rimuove automaticamente le precedenti
-run prima dell'avvio: termina i nodi Mininet hN/leafN/spineN/c0 e rimuove
-i bridge leafN/spineN e le relative interfacce. Questi nomi sono riservati
-a Good-Fences: una nuova esecuzione sostituisce la simulazione precedente,
-anche se ancora attiva. Il controller Ryu resta in esecuzione.
+**Isolamento multi-tenant in un data center spine-leaf con SDN**
+(Mininet + Open vSwitch + controller Ryu, OpenFlow 1.3).
 
-## Dipendenze
+Progetto per il corso di NCIS. Il nome viene dal proverbio *"good fences make
+good neighbours"*: i tenant condividono la stessa infrastruttura fisica, ma
+ognuno resta dentro il proprio recinto.
 
-Il progetto usa una `.venv` Python 3.9. Tutte le dipendenze Python, comprese
-quelle della GUI e delle utility di test, sono raccolte in `requirements.txt`.
-Installarle dalla radice del progetto:
+## Autori
+
+| Nome e cognome | Matricola | GitHub |
+| --- | --- | --- |
+| Marco Canonicoo | DE9000168 | [MarcoCanonico](https://github.com/MarcoCanonico) |
+| Luca Carraturo | DE9000145 | [LucaCarr0](https://github.com/LucaCarr0) |
+| Marco Fabi | DE9000173 | [kerubysio](https://github.com/kerubysio) |
+
+## Indice
+
+- [Tematica](#tematica)
+- [Cosa risolve](#cosa-risolve)
+- [Topologia di riferimento](#topologia-di-riferimento)
+- [Come funziona](#come-funziona)
+- [Struttura del repository](#struttura-del-repository)
+- [Requisiti](#requisiti)
+- [Installazione](#installazione)
+- [Avvio](#avvio)
+- [Verifica rapida](#verifica-rapida)
+- [Usare il visualizer](#usare-il-visualizer)
+- [Modificare topologia e tenant](#modificare-topologia-e-tenant)
+- [Test](#test)
+- [Risoluzione dei problemi](#risoluzione-dei-problemi)
+- [Documentazione aggiuntiva](#documentazione-aggiuntiva)
+
+## Tematica
+
+In un data center multi-tenant più clienti (*tenant*) condividono gli stessi
+switch e gli stessi collegamenti. Ogni tenant sceglie liberamente il proprio
+piano di indirizzamento, quindi due tenant possono usare **la stessa subnet e
+perfino gli stessi indirizzi IP**. La rete deve comunque garantire che il
+traffico di un tenant non raggiunga mai gli host di un altro, anche quando un
+host prova a falsificare MAC, IP o tag VLAN.
+
+Good-Fences simula una fabric **spine-leaf** con Mininet e affida tutte le
+decisioni di inoltro a un controller SDN Ryu, che installa una pipeline
+OpenFlow 1.3 statica e isolata per tenant, ricavata da due file YAML.
+
+## Cosa risolve
+
+- **Isolamento tra tenant con IP sovrapposti**: il leaf identifica il tenant
+  dalla porta di ingresso e applica il suo tag VLAN; le regole di inoltro
+  confrontano sempre VLAN, MAC e IP di destinazione. I tenant A e B usano
+  entrambi `10.0.0.0/24` senza interferire.
+- **Anti-spoofing**: dalle porte host passa solo traffico untagged con porta,
+  MAC e IP sorgente coerenti con il binding configurato. Frame già taggati,
+  tag annidati, ARP probe e gratuitous ARP vengono scartati.
+- **Proxy ARP**: il controller risponde alle richieste ARP al posto degli host,
+  solo per destinazioni dello stesso tenant. Nessun broadcast ARP attraversa la
+  fabric.
+- **Default deny**: switch in `failMode=secure` e regola table-miss DROP su ogni
+  tabella; porte libere (*spare*) e ingressi sconosciuti non inoltrano nulla.
+- **Bilanciamento ECMP**: ogni leaf distribuisce il traffico remoto su tutti gli
+  spine con un gruppo OpenFlow SELECT.
+- **Osservabilità**: una GUI web mostra topologia, permette di lanciare i casi
+  di test dagli host e confronta i contatori OpenFlow prima e dopo ogni prova.
+
+Limiti noti: il forwarding è statico (nessun apprendimento dinamico), i tenant
+si caricano solo all'avvio, il campo `rate_mbps` dei tenant non è ancora
+applicato (nessun meter/QoS) e non c'è failover in caso di guasto di un uplink.
+IPv6 è disabilitato sugli host.
+
+## Topologia di riferimento
+
+Configurazione di default (`config/topology.yaml` e `config/tenants.yaml`):
+2 spine, 3 leaf, 4 porte host per leaf, collegamento completo leaf ↔ spine.
+
+```text
+              ┌──────────┐                     ┌──────────┐
+              │  spine1  │                     │  spine2  │
+              │ DPID 101 │                     │ DPID 102 │
+              └──────────┘                     └──────────┘
+   porta N dello spine ──► leafN        porta 5 del leaf ──► spine1
+                                        porta 6 del leaf ──► spine2
+
+       ┌─────────┐            ┌─────────┐            ┌─────────┐
+       │  leaf1  │            │  leaf2  │            │  leaf3  │
+       │ DPID 1  │            │ DPID 2  │            │ DPID 3  │
+       └─────────┘            └─────────┘            └─────────┘
+       porte 1..4             porte 1..4             porte 1..4
+     h1  h2  h3  h4         h5  h6  h7  h8        h9  h10 h11 h12
+```
+
+| Leaf | Porta 1 · tenant A (VLAN 101) | Porta 2 · tenant B (VLAN 102) | Porta 3 · tenant C (VLAN 103) | Porta 4 |
+| --- | --- | --- | --- | --- |
+| leaf1 | h1 · 10.0.0.1 | h2 · 10.0.0.1 | h3 · 10.0.1.1 | h4 · spare |
+| leaf2 | h5 · 10.0.0.2 | h6 · 10.0.0.2 | h7 · 10.0.1.2 | h8 · spare |
+| leaf3 | h9 · 10.0.0.3 | h10 · 10.0.0.13 | h11 · 10.0.1.3 | h12 · spare |
+
+Il MAC di ogni host è `00:00:00:00:00:NN`, con `NN` uguale al numero
+dell'host in esadecimale (h10 → `00:00:00:00:00:0a`). Uplink a 60 Mbit/s,
+link host a 100 Mbit/s, ritardo 1 ms per link.
+
+## Come funziona
+
+**Leaf, 3 tabelle.**
+
+1. *Tabella 0, classificazione*: scarta frame taggati dalle porte host; manda
+   al controller le richieste ARP valide; accetta IPv4 untagged solo con
+   porta/MAC/IP del binding e applica il tag VLAN del tenant. Dagli uplink accetta
+   IPv4 con una VLAN nota.
+2. *Tabella 1, destinazione*: ammette solo destinazioni con VLAN, MAC e IP
+   coerenti con un host di quel tenant.
+3. *Tabella 2, inoltro*: se l'host è locale toglie la VLAN e consegna; altrimenti
+   invia al gruppo ECMP (gruppo `1`, tipo SELECT, un bucket per spine).
+
+**Spine, 1 tabella.** Inoltra verso il leaf di destinazione mantenendo la VLAN,
+solo per IPv4 con VLAN/MAC/IP noti e mai verso la porta di ingresso.
+
+**Proxy ARP.** La logica è in `src/controller/arp_proxy.py`: dato il tenant
+della porta richiedente, risolve `(tag, IP)` e costruisce la risposta, che
+torna solo alla porta di ingresso. Gli ARP non vengono mai inoltrati agli spine.
+
+**Installazione sicura.** Alla connessione di ogni switch il controller cancella
+i vecchi flow, ripristina i DROP, crea il gruppo ECMP e attende una Barrier
+prima di installare le regole permissive. Una seconda Barrier conferma la
+pipeline: solo allora lo switch è **READY**. Errori OpenFlow o timeout
+impediscono lo stato READY.
+
+Matrice completa delle regole, priorità e cookie:
+[docs/pipeline.md](docs/pipeline.md).
+
+## Struttura del repository
+
+```text
+config/
+  topology.yaml          # numero di spine/leaf/porte, banda e ritardo dei link
+  tenants.yaml           # tenant, tag VLAN, host assegnati con IP
+src/
+  network_models.py      # carica e valida gli YAML (modello condiviso)
+  datacenter.py          # costruisce la rete Mininet (SpineLeafTopo)
+  controller/app.py      # app Ryu: connessione switch, Barrier, PacketIn
+  controller/pipeline.py # regole OpenFlow e gruppo ECMP
+  controller/arp_proxy.py
+  visualizer_support.py  # processi e dati per la GUI
+  runtime_status.py      # stato condiviso con la GUI (file JSON)
+visualizer.py            # GUI Streamlit
+scripts/
+  start-controller.sh    # avvia Ryu sulla porta 6653
+  start-network.sh       # pulisce le run precedenti e avvia Mininet con CLI
+  start-visualizer.sh    # avvia la GUI su http://127.0.0.1:8501
+  cleanup-network.py     # rimuove nodi, bridge e interfacce residue
+tests/network/
+  packet_io.py           # genera e cattura pacchetti di test (Scapy)
+  flow_visualizer.py     # contatori OpenFlow da terminale
+  test_*.py              # test automatici delle utility
+docs/                    # documentazione di dettaglio
+```
+
+## Requisiti
+
+- **Linux** con `sudo` (testato su Pop!_OS / Ubuntu 24.04).
+- **Mininet** 2.3 (serve il binario `mnexec`) e **Open vSwitch** in esecuzione
+  (testato con OVS 3.3).
+- **Python 3.9**: Ryu 4.34 non funziona con le versioni più recenti di Python.
+- **xterm** e una sessione grafica, solo per il pulsante **Apri shell** della GUI.
+- Un browser per la GUI.
+
+Su Ubuntu 24.04 Python 3.9 non è nei repository ufficiali; si installa per
+esempio dal PPA deadsnakes:
+
+```bash
+sudo add-apt-repository ppa:deadsnakes/ppa
+```
+
+```bash
+sudo apt install mininet openvswitch-switch xterm python3.9 python3.9-venv
+```
+
+```bash
+sudo systemctl enable --now openvswitch-switch
+```
+
+## Installazione
+
+Tutti i comandi vanno eseguiti dalla radice del progetto. Gli script usano
+`.venv/bin/...`, quindi l'ambiente virtuale deve chiamarsi esattamente `.venv`.
+
+```bash
+git clone https://github.com/LucaCarr0/Good-Fences.git
+```
+
+```bash
+cd Good-Fences
+```
+
+```bash
+python3.9 -m venv .venv
+```
+
+```bash
+.venv/bin/python -m pip install --upgrade pip
+```
 
 ```bash
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-La simulazione richiede Linux, Mininet e Open vSwitch in esecuzione.
-Per **Apri shell** dalla GUI serve anche xterm con una sessione grafica locale.
-Gli strumenti di sistema non vengono installati da `requirements.txt`.
-
-## Visualizzatore GUI
-
-La dashboard Streamlit avvia e arresta **Mininet e Ryu**, mostra la topologia,
-invia i casi di `packet_io.py` dagli host e confronta flow e bucket OpenFlow.
-Dopo aver installato le dipendenze:
-
-```bash
-bash scripts/start-visualizer.sh
-```
-
-Aprire <http://127.0.0.1:8501>, premere **Avvia rete** e attendere **5/5 switch
-READY** con la configurazione attuale. In questa modalità non avviare i due
-script CLI: chiudere prima eventuali reti Mininet con `exit` e controller con
-`Ctrl+C`. La GUI segnala i conflitti senza sostituire una rete esterna.
-**Arresta rete** chiude prima Mininet e poi Ryu. La chiusura della scheda del
-browser lascia attiva la simulazione; arrestarla dalla GUI prima di terminare
-Streamlit con `Ctrl+C`.
-
-La [guida del visualizzatore](docs/visualizer.md) descrive viste e verifiche.
-
-## Proxy ARP
-
-Il controller risponde alle richieste ARP degli host assegnati usando IP e MAC
-del modello YAML. Il tenant viene identificato da DPID e porta di ingresso:
-la risoluzione usa `(tag tenant, IP)`, anche quando due tenant hanno IP uguali.
-La risposta untagged torna soltanto alla porta richiedente. Gli ARP non vengono
-inoltrati agli spine; il traffico IPv4 segue il forwarding unicast descritto sotto.
-
-La logica del protocollo e' in `src/controller/arp_proxy.py`: la funzione
-`build_arp_reply` controlla il tipo di richiesta e la destinazione e restituisce
-il frame di risposta oppure `None`. `app.py` gestisce l'evento PacketIn,
-i controlli sul datapath e l'invio
-PacketOut alla porta richiedente.
-
-Sono scartate le destinazioni sconosciute nel tenant del richiedente.
-Le regole OpenFlow scartano frame tagged dalle porte host e ARP dalle porte spare
-o dagli uplink. Le entry OpenFlow verificano MAC Ethernet, MAC ARP e IP sorgente contro
-il binding della porta. Probe e gratuitous ARP vengono scartati esplicitamente.
-Il forwarding IPv4 è statico e isolato per tenant. Non sono implementati
-apprendimento dinamico e rate limiting delle richieste verso il controller.
-I binding sono caricati all'avvio: future modifiche runtime ai tenant dovranno
-aggiornare sia gli indici del controller sia le regole delle porte.
-
-### Test rapido del proxy ARP
-
-Con controller e rete avviati, attendere `ALL SWITCHES READY`.
-
-1. Dal terminale Linux, vedere le tabelle prima della richiesta:
-
-```bash
-sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
-```
-
-2. Dalla CLI Mininet, svuotare la cache e generare la richiesta:
-
-```text
-h2 ip neigh flush dev h2-eth0
-h2 ping -n -c 1 -W 1 h6
-h2 ip neigh show 10.0.0.2
-```
-
-3. Dal terminale Linux, vedere le tabelle dopo la richiesta:
-
-```bash
-sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
-```
-
-Risultato atteso: aumenta `n_packets` della regola ARP su `leaf1-eth2`
-e la cache di h2 mostra `lladdr 00:00:00:00:00:06` (h6).
-Il ping genera prima ARP e deve riuscire tra h2 e h6, entrambi nel tenant B.
-
-### Risultati attesi da h1
-
-Prima di ogni caso: `h1 ip neigh flush dev h1-eth0`. Dopo il ping,
-controllare la cache con `h1 ip neigh show`.
-
-| Caso | Comando CLI Mininet | Risultato atteso |
-| --- | --- | --- |
-| 1: stesso tenant | `h1 ping -c 1 -W 1 h5` | ARP risolto: `.2` → `00:00:00:00:00:05` (`REACHABLE` o `STALE`). Ping riuscito. |
-| 2: nome di altro tenant, stesso IP | `h1 ping -c 1 -W 1 h6` | Raggiunge h5: h6 ha lo stesso IP di h5, quindi h1 risolve il MAC di h5 nel tenant A. Questo comando non verifica l'isolamento. |
-| 3: IP assente nel tenant A | `h1 ping -c 1 -W 1 h10` | `10.0.0.13` senza MAC: `INCOMPLETE`, poi `FAILED`. Nessuna risposta ARP. |
-| 4: subnet diversa | `h1 ping -c 1 -W 1 h7` | `Network is unreachable`: manca una route verso `10.0.1.0/24`, nessuna richiesta ARP. |
-
-
-## Forwarding unicast isolato con ECMP
-
-IPv4 untagged dalle porte assegnate viene ammesso solo con MAC/IP sorgenti del
-modello e riceve la VLAN del tenant in tabella 0. La tabella 1 ammette soltanto
-destinazioni con VLAN, MAC e IP coerenti con un host del tenant; la tabella 2
-consegna sul leaf locale togliendo la VLAN oppure richiama il gruppo ECMP.
-Ogni leaf ha un gruppo OpenFlow SELECT con ID `1`: i due bucket hanno peso `1`
-e inoltrano agli uplink del modello, porte **5 verso spine1** e **6 verso spine2**
-nella configurazione attuale. Entrambi gli uplink ammettono IPv4 con VLAN nota.
-Dalla fabric si può consegnare solo a host locali: non esiste un percorso
-uplink → uplink. Entrambi gli spine conservano la VLAN e inoltrano sul leaf di
-destinazione, mai sulla porta di ingresso. Spare e ingressi non ammessi ricadono
-nel default DROP a priorità 0. Isolamento, binding sorgente e proxy ARP restano
-invariati. Non sono introdotti meter, NORMAL o FLOOD.
-
-La funzione di supporto ECMP è direttamente in `src/controller/pipeline.py`.
-All'avvio e alla riconnessione il controller rimuove i vecchi flow, ripristina i
-DROP e ricrea soltanto il proprio gruppo ECMP. Una prima Barrier conferma questa
-preparazione prima di inviare i flow che usano il gruppo; la Barrier finale
-conferma l'intera pipeline. Errori OpenFlow o timeout impediscono lo stato READY.
-
-Avvio dalla radice, in due terminali:
-
-```bash
-bash scripts/start-controller.sh
-bash scripts/start-network.sh
-```
-
-Attendere `ALL SWITCHES READY: 5/5`, dopo entrambe le fasi di installazione.
-Per ispezionare manualmente le regole:
-
-```bash
-sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=0
-sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=1
-sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1 table=2
-sudo ovs-ofctl -O OpenFlow13 dump-groups leaf1
-sudo ovs-ofctl -O OpenFlow13 dump-group-stats leaf1
-```
-
-La [procedura manuale della pipeline](docs/pipeline.md) riporta matrice delle regole,
-trace, lettura dei contatori, comandi dalla CLI Mininet per frame falsificati,
-catture ARP e riconnessione. Include i comandi dell'utility
-`tests/network/packet_io.py` per verificare ARP Probe, Gratuitous ARP, RARP,
-IPv4 tagged e untagged, con ascolto sul
-destinatario e casi di isolamento. Negli attacchi con IP sovrapposti va indicato
-il MAC della vittima: il solo IP risolve un host del tenant della sorgente.
-La procedura riporta risultati attesi e, in fondo, i test automatici delle utility.
-
-L'utility usa Scapy, incluso nell'installazione da `requirements.txt`.
-
-Con controller e rete avviati, dopo `ALL SWITCHES READY: 5/5`, dalla CLI Mininet:
-
-```text
-h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case arp-request
-h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case arp-probe
-```
-
-Il caso `arp-request` invia una richiesta ARP normale verso h6: è attesa una
-risposta del proxy. Per `arp-probe` sono invece attese zero risposte.
-Questi due comandi inviano un frame e mostrano richiesta e risposte con MAC, IP,
-operazione e VLAN leggibili, senza stringhe esadecimali. La verifica si fa
-manualmente confrontando i contatori di `ovs-ofctl dump-flows` prima e dopo.
-
-### Usare `--listen` con due terminali
-
-Il listener ascolta sul destinatario h6 mentre h2 invia un frame. Si usa la
-stessa CLI Mininet per entrambi: **non serve un terzo terminale**.
-Eseguire un comando alla volta; non digitare il prefisso `mininet>`.
-
-1. **Terminale 1**, dove gira `start-controller.sh`: lasciarlo in esecuzione.
-   Attendere `ALL SWITCHES READY: 5/5`; qui non bisogna inserire comandi di test.
-
-2. **Terminale 2**, dove gira `start-network.sh`: al prompt `mininet>` avviare
-   il listener su h6:
-
-   ```text
-   h6 .venv/bin/python tests/network/packet_io.py --iface h6-eth0 --listen --timeout 60 > /tmp/good-fences-h6-ipv4.log 2>&1 &
-   ```
-
-   `h6` esegue il comando dentro quell'host; `--listen` ascolta per 60 secondi.
-   Il `&` finale lascia il listener in background e restituisce il prompt
-   Mininet, così si può inviare da h2. L'output viene salvato nel file di log.
-
-3. Sempre nel **terminale 2**, controllare che il listener sia pronto:
-
-   ```text
-   h6 cat /tmp/good-fences-h6-ipv4.log
-   ```
-
-   Deve comparire `Cattura pronta su h6-eth0`. Se il file è ancora vuoto,
-   ripetere questo `cat` dopo un secondo. Appena compare la riga, proseguire.
-
-4. Sempre nel **terminale 2**, inviare da h2 verso h6:
-
-   ```text
-   h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case ipv4-untagged --target-ip 10.0.0.2 --target-mac 00:00:00:00:00:06
-   ```
-
-5. I frame ricevuti vengono stampati **al termine della cattura**, non subito.
-   Per aspettare senza cronometrare, eseguire questi comandi nel **terminale 2**:
-
-   ```text
-   h6 sleep 60
-   h6 cat /tmp/good-fences-h6-ipv4.log
-   ```
-
-   `sleep` tiene occupata la CLI per un minuto. Il log deve poi mostrare
-   `Frame IPv4 protocollo 253 catturati: 1`, Ethernet h2 (`...:02`) → h6
-   (`...:06`), IP `10.0.0.1` → `10.0.0.2` e `VLAN: assente (untagged)`.
-   Per un nuovo test ripartire dal punto 2: il listener precedente è terminato.
-
-Il protocollo sperimentale 253 non ha una risposta applicativa, ma il kernel
-del destinatario può generare un ICMP `Protocol Unreachable`. Questo traffico
-di ritorno incrementa la regola dello spine verso il mittente: un solo invio
-può quindi incrementare due regole distinte, una per direzione.
-`--listen` cattura in promiscuità tutti i frame IPv4 con protocollo 253 e non
-mostra questi ICMP (protocollo 1). Per provare la consegna leggere il listener,
-non l'assenza di reply sul mittente. `--timeout` vale 5 secondi in ascolto e 1 in invio
-quando non è specificato. Nella procedura della pipeline sono riportati gli
-attacchi cross-tenant e i percorsi leaf/spine attesi.
-Per nuovi scenari basta aggiungere un nome a `CASES` e costruire il relativo
-pacchetto in `build_packet`.
-
-### Visualizzatore dei contatori leaf/spine
-
-Da un altro terminale Linux, con la rete avviata:
-
-```bash
-sudo .venv/bin/python tests/network/flow_visualizer.py
-```
-
-Scegli il numero o il nome dello switch. Il visualizzatore mostra un riepilogo
-per tabella/tipo di regola, i contatori delle singole regole e i bucket dei gruppi
-dello switch scelto. Per ciascun bucket mostra peso, porta di uscita, pacchetti e
-byte prima/dopo, delta e percentuale dei pacchetti rispetto al delta del gruppo.
-Non richiede nuove dipendenze e legge soltanto lo stato OVS.
-
-- `b`: salva i contatori attuali di flow e bucket come riferimento **prima del test**.
-- Esegui il caso con `packet_io.py` nella CLI Mininet, poi `r` per aggiornare:
-  `Delta pkt` mostra gli incrementi rispetto al riferimento, anche per i bucket.
-- `a`: alterna tutte le regole e quelle con pacchetti.
-- Inserisci l'ID di una regola per vedere match, azioni e delta byte leggibili.
-- `s`: scegli un altro leaf/spine e ricrea il riferimento; `q`: esci.
-
-Per aprire direttamente leaf1 o ottenere una singola schermata:
-
-```bash
-sudo .venv/bin/python tests/network/flow_visualizer.py --switch leaf1
-sudo .venv/bin/python tests/network/flow_visualizer.py --switch spine1 --once
-```
-
-Puoi anche leggere un dump salvato (o il testo copiato dal terminale), senza sudo:
-
-```bash
-.venv/bin/python tests/network/flow_visualizer.py --file /tmp/leaf1-flows.txt --active
-```
-
-La modalità `--file` legge solo i flow, senza informazioni sui gruppi.
-Assenza di gruppi, errori di lettura e contatori azzerati sono indicati nella
-schermata. Con un riferimento invalido o delta totale nullo la percentuale dei
-bucket non viene calcolata.
-
-I contatori sono passaggi nelle regole: un pacchetto può essere contato in più
-tabelle. `ARP al controller` conta le richieste, non prova che il proxy abbia
-risposto; controlla anche l'output di `packet_io.py`. `reset` indica contatori
-diminuiti o regole reinstallate; `nuova` indica una regola assente nel riferimento.
-
-
-### Verifica manuale ECMP
-
-Il caso `ecmp-udp` invia più flussi UDP: cambia la porta sorgente da `40000` in
-poi e mantiene la porta destinazione `9000`. I valori predefiniti sono 100
-flussi e 10 pacchetti per flusso. Gli indirizzi restano configurabili con le
-opzioni già presenti; l'output riporta tuple e pacchetti effettivamente inviati.
-
-1. Nel visualizzatore scegliere `leaf1` e premere `b` per salvare il riferimento.
-2. Dalla CLI Mininet inviare il traffico autorizzato h2 → h6:
-
-   ```text
-   h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case ecmp-udp --flows 100 --packets-per-flow 10
-   ```
-
-3. Nel visualizzatore premere `r` e leggere i due bucket del gruppo `1`.
-   Entrambi devono avere un delta pacchetti positivo. Registrare contatori
-   prima/dopo, traffico offerto, percentuali osservate e versione OVS.
-
-Ripetere la stessa misura scegliendo `leaf2` per h6 → h10 e `leaf3` per h10 → h2;
-i comandi completi sono nella [procedura ECMP](docs/pipeline.md#verifica-manuale-ecmp).
-Un risultato diverso da 50/50 può essere corretto: i pesi sono uguali, ma la
-selezione dipende dall'hash e dalla configurazione OVS. Un solo ping non deve
-necessariamente attraversare entrambi gli spine.
-
-`--listen` continua a catturare soltanto IPv4 con protocollo 253: non è il
-listener per il traffico UDP di `ecmp-udp`. La distribuzione si verifica dai
-bucket, la consegna e l'isolamento con le prove IPv4/ARP precedenti.
-La tolleranza ai guasti degli uplink richiede un lavoro separato.
-
-### Test automatici delle utility
-
-I test in `tests/network` verificano costruzione e cattura dei pacchetti,
-generazione delle tuple UDP e parsing e confronto dei contatori OpenFlow.
-Si eseguono senza avviare la rete:
+`requirements.txt` contiene tutte le dipendenze Python: Ryu, Mininet (API
+Python), PyYAML, Scapy per i test, Streamlit, pandas e Plotly per la GUI.
+Gli strumenti di sistema (Mininet, OVS, xterm) non vengono installati da pip.
+
+Controllo dell'installazione, senza avviare la rete:
 
 ```bash
 .venv/bin/python -B -m unittest discover -s tests/network -v
 ```
 
-La pipeline del controller e il funzionamento completo della GUI si verificano
-manualmente con le procedure documentate.
+## Avvio
+
+Ci sono due modi alternativi di avviare la simulazione: **non usarli insieme**.
+
+### Avvio con la GUI (consigliato)
+
+```bash
+bash scripts/start-visualizer.sh
+```
+
+Lo script chiede la password di `sudo` (Mininet richiede root). Aprire
+<http://127.0.0.1:8501>, premere **Avvia rete** nella barra laterale e attendere
+**Simulazione pronta · 5/5 switch READY**. La GUI avvia da sola Ryu e Mininet.
+Per chiudere: **Arresta rete**, poi `Ctrl+C` nel terminale di Streamlit.
+
+### Avvio da terminale (CLI)
+
+Servono due terminali, entrambi nella radice del progetto.
+
+Terminale 1, controller:
+
+```bash
+bash scripts/start-controller.sh
+```
+
+Terminale 2, rete Mininet:
+
+```bash
+bash scripts/start-network.sh
+```
+
+Attendere nel terminale 1 il messaggio `ALL SWITCHES READY: 5/5`. Il terminale 2
+mostra il prompt `mininet>` da cui eseguire i comandi sugli host.
+`start-network.sh` rimuove automaticamente eventuali residui di run precedenti
+(nodi `hN`/`leafN`/`spineN`/`c0` e relativi bridge e interfacce) senza toccare il
+controller.
+
+Per chiudere: `exit` nella CLI Mininet, poi `Ctrl+C` nel terminale del controller.
+
+### Pulizia manuale
+
+Se una simulazione si è interrotta in modo anomalo e restano bridge o
+interfacce:
+
+```bash
+sudo .venv/bin/python scripts/cleanup-network.py
+```
+
+Lo script elimina tutto ciò che ha nomi riservati a Good-Fences: non usarlo con
+una rete ancora in uso.
+
+## Verifica rapida
+
+Dalla CLI Mininet (oppure da **Apri shell** nella GUI), con tutti gli switch
+READY:
+
+| Comando | Risultato atteso | Cosa dimostra |
+| --- | --- | --- |
+| `h1 ping -c 2 h5` | 0% packet loss | tenant A, leaf diversi (via spine) |
+| `h2 ping -c 2 h6` | 0% packet loss | tenant B con gli stessi IP del tenant A |
+| `h3 ping -c 2 h11` | 0% packet loss | tenant C |
+| `h1 ping -c 2 10.0.0.13` | 100% packet loss | `10.0.0.13` esiste solo nel tenant B (h10): isolamento |
+| `h1 ping -c 2 h7` | `Network is unreachable` | subnet diversa, nessuna route |
+
+Attenzione: `h1 ping h6` riesce, ma raggiunge **h5**. Mininet traduce `h6` nel
+suo IP `10.0.0.2`, che nel tenant A appartiene a h5. Per provare l'isolamento
+tra tenant con IP sovrapposti serve indicare il MAC della vittima con
+`packet_io.py` (vedi [test manuali](docs/test-manuali.md)).
+
+Per vedere le regole installate su uno switch, da un altro terminale:
+
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-flows leaf1
+```
+
+```bash
+sudo ovs-ofctl -O OpenFlow13 dump-group-stats leaf1
+```
+
+## Usare il visualizer
+
+Il visualizer è una dashboard Streamlit che gestisce l'intera simulazione.
+Avviarlo come descritto in [Avvio con la GUI](#avvio-con-la-gui-consigliato).
+
+### Barra laterale
+
+- **Avvia rete** / **Arresta rete**: avviano e fermano Ryu e Mininet. L'arresto
+  chiude prima Mininet e poi Ryu.
+- **Apri shell**: apre un xterm con la CLI `mininet>` collegata alla rete attiva
+  (per esempio `h2 ping h6`). `exit` chiude solo la shell, non la rete.
+- **Riquadro di stato**: numero di switch READY ed eventuali errori.
+- **Log Mininet** / **Log controller**: ultimi messaggi dei due processi, utili
+  se la rete non diventa pronta.
+- **Navigazione**: le tre pagine descritte sotto.
+
+### Pagina Topologia
+
+Grafo di spine, leaf e host colorati per tenant, con VLAN e host spare.
+Cliccare un nodo (o sceglierlo dal menu) per vederne i dettagli: per un host IP,
+MAC, leaf, porta e tenant; per uno switch attivo le regole OpenFlow e i contatori.
+L'espansione **Porte e collegamenti configurati** elenca le porte a entrambe le
+estremità di ogni link.
+
+### Pagina Test
+
+1. Scegliere **Host sorgente**, **Host destinazione** e il **Caso di test**.
+2. IP e MAC sono precompilati dal modello e si possono modificare per simulare
+   spoofing o attacchi tra tenant.
+3. Premere **Avvia test**: il caso viene eseguito nel namespace dell'host
+   sorgente con `packet_io.py`.
+
+Casi disponibili:
+
+| Caso | Cosa invia | Risultato atteso (stesso tenant) |
+| --- | --- | --- |
+| `arp-request` | richiesta ARP normale | 1 risposta dal proxy |
+| `arp-probe` | ARP con IP sorgente 0.0.0.0 | nessuna risposta |
+| `gratuitous-arp` | ARP con sorgente = destinazione | nessuna risposta |
+| `rarp` | Reverse ARP | nessuna risposta |
+| `ipv4-tagged` | IPv4 con VLAN impostata dall'host | scartato dal leaf |
+| `ipv4-untagged` | IPv4 normale (protocollo 253) | consegnato |
+| `ecmp-udp` | molti flussi UDP con porte sorgente diverse | distribuiti sui bucket ECMP |
+
+Un invio completato non dimostra la consegna: per IPv4 serve una cattura sul
+destinatario, per ECMP i contatori dei bucket.
+
+### Pagina Statistiche
+
+- Vista **Rete**: **Leggi tutti gli switch** riassume regole e contatori di ogni
+  switch.
+- Vista **Singolo switch**: tabella delle regole con filtri per tabella, tipo di
+  regola e testo, grafico dei contatori e bucket del gruppo ECMP.
+
+Flusso tipico per misurare l'effetto di un test:
+
+1. **Statistiche** → **Singolo switch** → scegliere lo switch (es. `leaf1`) →
+   **Salva riferimento prima del test**.
+2. **Test** → eseguire il caso (es. `h2` → `h6`, `ecmp-udp`).
+3. Tornare su **Statistiche** → **Aggiorna statistiche** e leggere i delta.
+   Nella tabella delle regole la colonna **Delta pkt** va attivata da
+   **Colonne aggiuntive**; la tabella dei bucket ECMP la mostra sempre.
+
+Con `ecmp-udp` entrambi i bucket del gruppo `1` devono aumentare. La divisione
+non è necessariamente 50/50: dipende dall'hash di OVS.
+
+Dettagli su ogni vista e sul significato di `valido`/`nuova`/`reset`:
+[docs/visualizer.md](docs/visualizer.md).
+
+### Visualizzatore da terminale
+
+Alternativa testuale alla pagina Statistiche, utile con l'avvio da CLI:
+
+```bash
+sudo .venv/bin/python tests/network/flow_visualizer.py --switch leaf1
+```
+
+Tasti: `b` salva il riferimento, `r` aggiorna e mostra i delta, `a` mostra
+tutte le regole o solo quelle con pacchetti, `s` cambia switch, `q` esce.
+Le istruzioni complete sono nei [test manuali](docs/test-manuali.md#visualizzatore-dei-contatori-leafspine).
+
+## Modificare topologia e tenant
+
+Rete Mininet e controller leggono **entrambi** i file in `config/` all'avvio.
+Procedura:
+
+1. Arrestare la simulazione (**Arresta rete** oppure `exit` + `Ctrl+C`).
+2. Modificare `config/topology.yaml` e/o `config/tenants.yaml`.
+3. Validare la configurazione (vedi sotto).
+4. Riavviare. Il numero di switch attesi diventa `leaves + spines`
+   (per esempio `7/7` con 3 spine e 4 leaf).
+
+### `config/topology.yaml`
+
+| Campo | Significato | Default |
+| --- | --- | --- |
+| `spines` | numero di switch spine | 2 |
+| `leaves` | numero di switch leaf | 3 |
+| `hosts_per_leaf` | porte host per leaf (ognuna ha un host) | 4 |
+| `uplink_bw_mbps` | banda dei link leaf ↔ spine | 60 |
+| `host_bw_mbps` | banda dei link host ↔ leaf | 100 |
+| `link_delay_ms` | ritardo di ogni link | 1 |
+
+### `config/tenants.yaml`
+
+```yaml
+tenants:
+  - name: A              # nome del tenant
+    tag: 101             # VLAN del tenant: 1..4094, unica
+    rate_mbps: 20        # riservato per la QoS, non ancora applicato
+    subnet: 10.0.0.0/24  # documentativo: gli host ricevono sempre una /24
+    hosts:
+      - {name: h1, leaf: leaf1, port: 1, ip: 10.0.0.1}
+```
+
+### Regole di numerazione
+
+La topologia è generata in modo deterministico, quindi nomi e porte vanno scritti
+rispettando queste regole:
+
+- **Nome host**: `hN` con `N = (numero_leaf - 1) × hosts_per_leaf + porta`.
+  Esempio con 4 porte: leaf2 porta 3 → `h7`.
+- **MAC**: `00:00:00:00:00:NN`, con `NN` uguale a `N` in esadecimale.
+- **Porte del leaf**: da `1` a `hosts_per_leaf` per gli host, poi un uplink per
+  ogni spine (`hosts_per_leaf + 1` verso spine1, e così via).
+- **Porte dello spine**: la porta `i` va verso `leaf<i>`.
+- **DPID**: `leafN` → `N`, `spineN` → `100 + N`.
+- Ogni porta host non assegnata a un tenant diventa automaticamente uno spare
+  (host senza IP, tutto il suo traffico viene scartato). La lista `spare_hosts`
+  in fondo a `tenants.yaml` è solo un promemoria: il programma non la legge.
+
+### Vincoli verificati all'avvio
+
+Il modello rifiuta la configurazione, con un messaggio esplicito, se:
+
+- un tag VLAN è fuori da `1..4094` o è usato da due tenant;
+- un IP manca, non è valido o è ripetuto nello stesso tenant
+  (tra tenant diversi gli IP possono coincidere);
+- un host compare in più tenant o due host usano la stessa porta;
+- il leaf non esiste o la porta è fuori da `1..hosts_per_leaf`;
+- il nome dell'host non rispetta la formula di numerazione.
+
+Altri limiti da rispettare: al massimo 255 host in totale (il MAC usa un solo
+byte), al massimo 100 leaf (DPID degli spine da 101), host di uno stesso tenant
+nella stessa /24 (non c'è routing tra subnet).
+
+**Attenzione**: cambiare `hosts_per_leaf` rinumera tutti gli host, quindi
+`tenants.yaml` va riscritto. Gli esempi di questo README e dei documenti in
+`docs/` fanno riferimento alla configurazione di default.
+
+### Validare senza avviare la rete
+
+```bash
+.venv/bin/python -c "import sys; sys.path.insert(0, 'src'); from network_models import NetworkModel; m = NetworkModel(); print('Configurazione valida:', m.spines, 'spine,', m.leaves, 'leaf,', len(m.get_all_hosts_dict()), 'host')"
+```
+
+Anche la GUI valida i file: se sono errati mostra **Configurazione non valida**
+con il motivo.
+
+### Esempio: 3 spine, 4 leaf e un nuovo tenant D
+
+In `config/topology.yaml`:
+
+```yaml
+spines: 3
+leaves: 4
+hosts_per_leaf: 4
+```
+
+In `config/tenants.yaml`, aggiungere `h15` al tenant C e creare il tenant D
+con alcuni spare:
+
+```yaml
+  - name: C
+    tag: 103
+    rate_mbps: 20
+    subnet: 10.0.1.0/24
+    hosts:
+      - {name: h3, leaf: leaf1, port: 3, ip: 10.0.1.1}
+      - {name: h7, leaf: leaf2, port: 3, ip: 10.0.1.2}
+      - {name: h11, leaf: leaf3, port: 3, ip: 10.0.1.3}
+      - {name: h15, leaf: leaf4, port: 3, ip: 10.0.1.4}  # nuovo
+
+  - name: D
+    tag: 104
+    rate_mbps: 20
+    subnet: 10.0.2.0/24
+    hosts:
+      - {name: h4,  leaf: leaf1, port: 4, ip: 10.0.2.1}
+      - {name: h8,  leaf: leaf2, port: 4, ip: 10.0.2.2}
+      - {name: h16, leaf: leaf4, port: 4, ip: 10.0.2.3}
+```
+
+Al riavvio il controller riporta `ALL SWITCHES READY: 7/7`, ogni leaf ha tre
+uplink (porte 5, 6 e 7) e tre bucket ECMP, `h4 ping h16` funziona e
+`h4 ping h1` fallisce (`Network is unreachable`). Gli host rimasti liberi (h12,
+h13, h14) sono spare.
+
+## Test
+
+**Automatici**, senza avviare la rete: generazione e cattura dei pacchetti,
+tuple UDP per ECMP, parsing e confronto dei contatori OpenFlow.
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests/network -v
+```
+
+**Manuali**, con la rete avviata:
+
+- [docs/test-manuali.md](docs/test-manuali.md): proxy ARP, risultati attesi da
+  h1, uso di `packet_io.py` e del listener `--listen`, visualizzatore dei
+  contatori, misura ECMP.
+- [docs/pipeline.md](docs/pipeline.md): trace delle regole, frame falsificati,
+  attacchi cross-tenant, catture ARP, riconnessione degli switch.
+
+Esempio dalla CLI Mininet (richiesta ARP da h2 verso h6, attesa una risposta
+del proxy):
+
+```text
+h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case arp-request
+```
+
+## Risoluzione dei problemi
+
+| Sintomo | Causa e soluzione |
+| --- | --- |
+| La GUI dice "Esistono già bridge Good-Fences" | C'è una rete avviata da terminale: chiuderla con `exit`, oppure eseguire `cleanup-network.py` se è un residuo. |
+| "Porta 6653 occupata" | Un controller Ryu è già attivo: fermarlo con `Ctrl+C` nel suo terminale. |
+| Gli switch non arrivano a READY | Controllare **Log controller** nella GUI o il terminale di Ryu (errori OpenFlow, timeout). Verificare che OVS sia attivo: `sudo systemctl status openvswitch-switch`. |
+| **Apri shell** non apre nulla | Serve xterm e una sessione grafica locale; avviare la GUI con `start-visualizer.sh`, che preserva `DISPLAY`. |
+| Errori di installazione di Ryu | Verificare di usare Python 3.9 (`.venv/bin/python --version`) e di aver aggiornato pip. |
+| Ping tra tenant diversi "funziona" | Probabilmente IP sovrapposti: vedere la nota in [Verifica rapida](#verifica-rapida). |
+
+## Documentazione aggiuntiva
+
+- [docs/pipeline.md](docs/pipeline.md): politica di inoltro, matrice delle regole
+  OpenFlow, cookie e procedure di verifica della pipeline.
+- [docs/visualizer.md](docs/visualizer.md): guida dettagliata della GUI e della
+  sua architettura.
+- [docs/test-manuali.md](docs/test-manuali.md): procedure di test passo-passo
+  dalla CLI Mininet.
