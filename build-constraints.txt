@@ -1,0 +1,3 @@
+# Vincoli usati solo per compilare i pacchetti distribuiti come sorgente.
+# Ryu 4.34 usa easy_install.get_script_args, rimosso da setuptools 68.
+setuptools<68

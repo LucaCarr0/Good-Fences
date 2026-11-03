@@ -1,0 +1,14 @@
+services:
+  good-fences:
+    build: .
+    image: good-fences
+    # Mininet e OVS creano namespace di rete, veth, bridge e code tc.
+    privileged: true
+    init: true
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      # Topologia e tenant si modificano sull'host, senza ricostruire l'immagine.
+      - ./config:/app/config:ro
+      # Permette a OVS di caricare il modulo openvswitch se l'host non l'ha già caricato.
+      - /lib/modules:/lib/modules:ro

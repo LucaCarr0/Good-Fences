@@ -7,11 +7,14 @@ Tutte le dipendenze Python, incluse quelle della GUI, sono raccolte in
 `requirements.txt` e usano la `.venv` Python 3.9:
 
 ```bash
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --build-constraint build-constraints.txt -r requirements.txt
 bash scripts/start-visualizer.sh
 ```
 
 Lo script richiede sudo e apre il server soltanto su <http://127.0.0.1:8501>.
+Con Docker basta `docker compose up -d --build` (vedi il
+[README](../README.md#installazione-e-avvio)); nel container **Apri shell** non è
+disponibile.
 Premere **Avvia rete** nella barra laterale: la GUI avvia Ryu sulla porta 6653 e
 Mininet senza CLI. Attendere **Simulazione pronta**, con tutti gli switch READY.
 Non eseguire separatamente `start-controller.sh` o `start-network.sh`.

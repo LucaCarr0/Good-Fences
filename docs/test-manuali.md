@@ -3,7 +3,7 @@
 Procedure passo-passo per verificare dalla CLI Mininet proxy ARP, forwarding
 isolato ed ECMP. Prerequisiti: controller e rete avviati in due terminali
 (`bash scripts/start-controller.sh` e `bash scripts/start-network.sh`, vedi il
-[README](../README.md#avvio-da-terminale-cli)) e messaggio `ALL SWITCHES READY: 5/5`
+[README](../README.md#installazione-e-avvio)) e messaggio `ALL SWITCHES READY: 5/5`
 nel terminale del controller. I nomi degli host e gli indirizzi si riferiscono
 alla configurazione di default in `config/`.
 

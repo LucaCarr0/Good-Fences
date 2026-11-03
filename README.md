@@ -22,14 +22,11 @@ ognuno resta dentro il proprio recinto.
 - [Topologia di riferimento](#topologia-di-riferimento)
 - [Come funziona](#come-funziona)
 - [Struttura del repository](#struttura-del-repository)
-- [Requisiti](#requisiti)
-- [Installazione](#installazione)
-- [Avvio](#avvio)
+- [Installazione e avvio](#installazione-e-avvio)
 - [Verifica rapida](#verifica-rapida)
 - [Usare il visualizer](#usare-il-visualizer)
 - [Modificare topologia e tenant](#modificare-topologia-e-tenant)
 - [Test](#test)
-- [Risoluzione dei problemi](#risoluzione-dei-problemi)
 - [Documentazione aggiuntiva](#documentazione-aggiuntiva)
 
 ## Tematica
@@ -144,11 +141,16 @@ src/
   visualizer_support.py  # processi e dati per la GUI
   runtime_status.py      # stato condiviso con la GUI (file JSON)
 visualizer.py            # GUI Streamlit
+requirements.txt         # dipendenze Python
+build-constraints.txt    # vincoli per compilare Ryu senza Docker
+Dockerfile               # immagine con Python 3.9, Ryu, Mininet, OVS e GUI
+docker-compose.yml       # container privilegiato, GUI su 127.0.0.1:8501
 scripts/
   start-controller.sh    # avvia Ryu sulla porta 6653
   start-network.sh       # pulisce le run precedenti e avvia Mininet con CLI
   start-visualizer.sh    # avvia la GUI su http://127.0.0.1:8501
   cleanup-network.py     # rimuove nodi, bridge e interfacce residue
+  docker-entrypoint.sh   # nel container: avvia OVS e pulisce le run precedenti
 tests/network/
   packet_io.py           # genera e cattura pacchetti di test (Scapy)
   flow_visualizer.py     # contatori OpenFlow da terminale
@@ -156,41 +158,41 @@ tests/network/
 docs/                    # documentazione di dettaglio
 ```
 
-## Requisiti
+## Installazione e avvio
 
-- **Linux** con `sudo` (testato su Pop!_OS / Ubuntu 24.04).
-- **Mininet** 2.3 (serve il binario `mnexec`) e **Open vSwitch** in esecuzione
-  (testato con OVS 3.3).
-- **Python 3.9**: Ryu 4.34 non funziona con le versioni più recenti di Python.
-- **xterm** e una sessione grafica, solo per il pulsante **Apri shell** della GUI.
-- Un browser per la GUI.
+### Con Docker (consigliato)
 
-Su Ubuntu 24.04 Python 3.9 non è nei repository ufficiali; si installa per
-esempio dal PPA deadsnakes:
+Serve solo un host Linux con Docker. Dalla cartella del progetto:
 
 ```bash
-sudo add-apt-repository ppa:deadsnakes/ppa
+docker compose up -d --build
 ```
+
+Aprire <http://127.0.0.1:8501>, premere **Avvia rete** e attendere
+**Simulazione pronta · 5/5 switch READY**. Per fermare tutto: **Arresta rete**,
+poi `docker compose down`.
+
+Per usare la CLI Mininet al posto della GUI, in due terminali:
+
+```bash
+docker compose exec good-fences bash scripts/start-controller.sh
+```
+
+```bash
+docker compose exec good-fences bash scripts/start-network.sh
+```
+
+Attendere `ALL SWITCHES READY: 5/5` nel primo terminale; chiudere con `exit` e
+poi `Ctrl+C`. Gli altri comandi della documentazione che iniziano con `sudo` si
+lanciano con `docker compose exec good-fences` al posto di `sudo`.
+
+### Senza Docker
+
+Servono Linux, Mininet, Open vSwitch e Python 3.9 (Ryu 4.34 non supporta
+versioni più recenti; su Ubuntu 24.04 si installa dal PPA deadsnakes).
 
 ```bash
 sudo apt install mininet openvswitch-switch xterm python3.9 python3.9-venv
-```
-
-```bash
-sudo systemctl enable --now openvswitch-switch
-```
-
-## Installazione
-
-Tutti i comandi vanno eseguiti dalla radice del progetto. Gli script usano
-`.venv/bin/...`, quindi l'ambiente virtuale deve chiamarsi esattamente `.venv`.
-
-```bash
-git clone https://github.com/LucaCarr0/Good-Fences.git
-```
-
-```bash
-cd Good-Fences
 ```
 
 ```bash
@@ -202,69 +204,27 @@ python3.9 -m venv .venv
 ```
 
 ```bash
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --build-constraint build-constraints.txt -r requirements.txt
 ```
 
-`requirements.txt` contiene tutte le dipendenze Python: Ryu, Mininet (API
-Python), PyYAML, Scapy per i test, Streamlit, pandas e Plotly per la GUI.
-Gli strumenti di sistema (Mininet, OVS, xterm) non vengono installati da pip.
+`build-constraints.txt` serve a compilare Ryu 4.34, che non supporta le
+versioni recenti di setuptools.
 
-Controllo dell'installazione, senza avviare la rete:
-
-```bash
-.venv/bin/python -B -m unittest discover -s tests/network -v
-```
-
-## Avvio
-
-Ci sono due modi alternativi di avviare la simulazione: **non usarli insieme**.
-
-### Avvio con la GUI (consigliato)
+GUI, poi come sopra da <http://127.0.0.1:8501>:
 
 ```bash
 bash scripts/start-visualizer.sh
 ```
 
-Lo script chiede la password di `sudo` (Mininet richiede root). Aprire
-<http://127.0.0.1:8501>, premere **Avvia rete** nella barra laterale e attendere
-**Simulazione pronta · 5/5 switch READY**. La GUI avvia da sola Ryu e Mininet.
-Per chiudere: **Arresta rete**, poi `Ctrl+C` nel terminale di Streamlit.
-
-### Avvio da terminale (CLI)
-
-Servono due terminali, entrambi nella radice del progetto.
-
-Terminale 1, controller:
+Oppure CLI Mininet, in due terminali:
 
 ```bash
 bash scripts/start-controller.sh
 ```
 
-Terminale 2, rete Mininet:
-
 ```bash
 bash scripts/start-network.sh
 ```
-
-Attendere nel terminale 1 il messaggio `ALL SWITCHES READY: 5/5`. Il terminale 2
-mostra il prompt `mininet>` da cui eseguire i comandi sugli host.
-`start-network.sh` rimuove automaticamente eventuali residui di run precedenti
-(nodi `hN`/`leafN`/`spineN`/`c0` e relativi bridge e interfacce) senza toccare il
-controller.
-
-Per chiudere: `exit` nella CLI Mininet, poi `Ctrl+C` nel terminale del controller.
-
-### Pulizia manuale
-
-Se una simulazione si è interrotta in modo anomalo e restano bridge o
-interfacce:
-
-```bash
-sudo .venv/bin/python scripts/cleanup-network.py
-```
-
-Lo script elimina tutto ciò che ha nomi riservati a Good-Fences: non usarlo con
-una rete ancora in uso.
 
 ## Verifica rapida
 
@@ -297,13 +257,13 @@ sudo ovs-ofctl -O OpenFlow13 dump-group-stats leaf1
 ## Usare il visualizer
 
 Il visualizer è una dashboard Streamlit che gestisce l'intera simulazione.
-Avviarlo come descritto in [Avvio con la GUI](#avvio-con-la-gui-consigliato).
+Avviarlo come descritto in [Installazione e avvio](#installazione-e-avvio).
 
 ### Barra laterale
 
 - **Avvia rete** / **Arresta rete**: avviano e fermano Ryu e Mininet. L'arresto
   chiude prima Mininet e poi Ryu.
-- **Apri shell**: apre un xterm con la CLI `mininet>` collegata alla rete attiva
+- **Apri shell** (solo senza Docker): apre un xterm con la CLI `mininet>` collegata alla rete attiva
   (per esempio `h2 ping h6`). `exit` chiude solo la shell, non la rete.
 - **Riquadro di stato**: numero di switch READY ed eventuali errori.
 - **Log Mininet** / **Log controller**: ultimi messaggi dei due processi, utili
@@ -385,6 +345,9 @@ Procedura:
 3. Validare la configurazione (vedi sotto).
 4. Riavviare. Il numero di switch attesi diventa `leaves + spines`
    (per esempio `7/7` con 3 spine e 4 leaf).
+
+Con Docker la procedura è identica: i file si modificano sull'host e il
+container li legge al successivo avvio della rete, senza ricostruire l'immagine.
 
 ### `config/topology.yaml`
 
@@ -515,17 +478,6 @@ del proxy):
 ```text
 h2 .venv/bin/python tests/network/packet_io.py --iface h2-eth0 --case arp-request
 ```
-
-## Risoluzione dei problemi
-
-| Sintomo | Causa e soluzione |
-| --- | --- |
-| La GUI dice "Esistono già bridge Good-Fences" | C'è una rete avviata da terminale: chiuderla con `exit`, oppure eseguire `cleanup-network.py` se è un residuo. |
-| "Porta 6653 occupata" | Un controller Ryu è già attivo: fermarlo con `Ctrl+C` nel suo terminale. |
-| Gli switch non arrivano a READY | Controllare **Log controller** nella GUI o il terminale di Ryu (errori OpenFlow, timeout). Verificare che OVS sia attivo: `sudo systemctl status openvswitch-switch`. |
-| **Apri shell** non apre nulla | Serve xterm e una sessione grafica locale; avviare la GUI con `start-visualizer.sh`, che preserva `DISPLAY`. |
-| Errori di installazione di Ryu | Verificare di usare Python 3.9 (`.venv/bin/python --version`) e di aver aggiornato pip. |
-| Ping tra tenant diversi "funziona" | Probabilmente IP sovrapposti: vedere la nota in [Verifica rapida](#verifica-rapida). |
 
 ## Documentazione aggiuntiva
 

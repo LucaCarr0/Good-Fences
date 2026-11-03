@@ -130,7 +130,7 @@ L'ID di una regola apre match e azioni leggibili. Cambiando switch il riferiment
 viene ricreato; contatori azzerati o errori di lettura invalidano la relativa
 misura. Non si calcolano percentuali senza un riferimento valido o con delta
 totale nullo. La modalità `--file` resta limitata ai flow. Le istruzioni
-complete sono nel [README](../README.md#visualizzatore-dei-contatori-leafspine).
+complete sono nei [test manuali](test-manuali.md#visualizzatore-dei-contatori-leafspine).
 
 ## Utility per i pacchetti dei test manuali
 
@@ -138,7 +138,7 @@ L'utility richiede Scapy, incluso insieme alle altre dipendenze Python in
 `requirements.txt`. Installare le dipendenze nella `.venv` Python 3.9:
 
 ```bash
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --build-constraint build-constraints.txt -r requirements.txt
 ```
 
 Dalla CLI Mininet, avviata dalla radice del progetto, eseguire un caso alla volta:
