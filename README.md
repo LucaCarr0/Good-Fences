@@ -162,7 +162,29 @@ docs/                    # documentazione di dettaglio
 
 ### Con Docker (consigliato)
 
-Serve solo un host Linux con Docker. Dalla cartella del progetto:
+È necessario un host Linux con Docker Engine e Docker Compose v2 installati e funzionanti.
+
+Per verificare l'installazione:
+
+```bash
+docker --version
+```
+
+```bash
+docker compose version
+```
+
+```bash
+docker info
+```
+
+```bash
+git clone https://github.com/LucaCarr0/Good-Fences.git
+```
+
+```bash
+cd Good-Fences
+```
 
 ```bash
 docker compose up -d --build
@@ -186,29 +208,50 @@ Attendere `ALL SWITCHES READY: 5/5` nel primo terminale; chiudere con `exit` e
 poi `Ctrl+C`. Gli altri comandi della documentazione che iniziano con `sudo` si
 lanciano con `docker compose exec good-fences` al posto di `sudo`.
 
-### Senza Docker
+### Installazione manuale (senza Docker)
 
-Servono Linux, Mininet, Open vSwitch e Python 3.9 (Ryu 4.34 non supporta
-versioni più recenti; su Ubuntu 24.04 si installa dal PPA deadsnakes).
+Tutti i comandi devono essere eseguiti dalla directory principale del progetto.
+
+Clonare il repository:
 
 ```bash
-sudo apt install mininet openvswitch-switch xterm python3.9 python3.9-venv
+git clone https://github.com/LucaCarr0/Good-Fences.git
+cd Good-Fences
 ```
+
+Creare un ambiente virtuale con Python 3.9:
 
 ```bash
 python3.9 -m venv .venv
 ```
 
+Aggiornare `pip`:
+
 ```bash
 .venv/bin/python -m pip install --upgrade pip
 ```
 
+Installare le versioni compatibili degli strumenti di compilazione necessari per Ryu 4.34:
+
 ```bash
-.venv/bin/python -m pip install --build-constraint build-constraints.txt -r requirements.txt
+.venv/bin/python -m pip install "setuptools==67.6.1" wheel "pbr==5.11.1"
 ```
 
-`build-constraints.txt` serve a compilare Ryu 4.34, che non supporta le
-versioni recenti di setuptools.
+Installare le dipendenze del progetto:
+
+```bash
+.venv/bin/python -m pip install --no-build-isolation -r requirements.txt
+```
+
+Verificare che non siano presenti conflitti tra le dipendenze:
+
+```bash
+.venv/bin/python -m pip check
+```
+
+**Nota sulla compatibilità:** Ryu 4.34 utilizza strumenti di compilazione datati. L'installazione di una versione compatibile di `setuptools` e di `pbr`, insieme all'opzione `--no-build-isolation`, permette di evitare le incompatibilità riscontrate durante la generazione dei metadati del pacchetto.
+
+L'installazione delle dipendenze Python non sostituisce quella degli strumenti di sistema necessari per Mininet e Open vSwitch.
 
 GUI, poi come sopra da <http://127.0.0.1:8501>:
 
