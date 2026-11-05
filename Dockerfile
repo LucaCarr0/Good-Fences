@@ -18,6 +18,9 @@ RUN python -m venv .venv \
 
 COPY . .
 
+# Rende gli script indipendenti dai fine riga dell'host (CRLF su Windows).
+RUN find scripts -type f -name '*.sh' -exec sed -i 's/\r$//' {} +
+
 # Nel container la GUI ascolta su tutte le interfacce; compose la pubblica solo in locale.
 ENV GOOD_FENCES_GUI_ADDRESS=0.0.0.0
 EXPOSE 8501
