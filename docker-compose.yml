@@ -2,7 +2,7 @@ services:
   good-fences:
     build: .
     image: good-fences
-    # Mininet e OVS creano namespace di rete, veth, bridge e code tc.
+    # Mininet e OVS necessitano di sudo.
     privileged: true
     init: true
     ports:
