@@ -3,6 +3,7 @@
 Con controller e rete avviati (ALL SWITCHES READY), da un terminale Linux:
     sudo .venv/bin/python scripts/run-validation.py
     sudo .venv/bin/python scripts/run-validation.py --only T1 T11 T16
+    sudo .venv/bin/python scripts/run-validation.py --only T1 --pause
 Con Docker:
     docker compose exec good-fences .venv/bin/python scripts/run-validation.py
 
@@ -114,6 +115,23 @@ def run_case(lab, entry):
     except Exception as error:  # Un errore di misura non deve fermare gli altri casi.
         report.check('misura completata', False, f'{type(error).__name__}: {error}')
     report.close()
+    return report
+
+
+def wait_enter(message):
+    try:
+        input(f'    {message} ')
+    except EOFError:
+        pass
+
+
+def run_case_paused(lab, entry):
+    """Attende Invio prima e dopo il caso, per gli screenshot della dashboard."""
+    print(f'\n{entry.ident}: salvare il riferimento in "Statistiche" e fare lo screenshot "prima".')
+    wait_enter(f'Premere Invio per eseguire {entry.ident}...')
+    report = run_case(lab, entry)
+    print(f'{entry.ident} eseguito: premere "Aggiorna statistiche" e fare lo screenshot "dopo".')
+    wait_enter('Premere Invio per proseguire...')
     return report
 
 
@@ -917,6 +935,8 @@ def parse_args(argv=None):
                         help='Non eseguire T26 (riavvio interattivo del controller)')
     parser.add_argument('--timeout', type=float, default=2.0,
                         help='Secondi di cattura dopo ogni invio (default: 2)')
+    parser.add_argument('--pause', action='store_true',
+                        help='Attende Invio prima e dopo ogni caso, per gli screenshot')
     parser.add_argument('--agent', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.only:
@@ -944,7 +964,8 @@ def main(argv=None):
     print(paint('Good-Fences: validazione T1–T26', '1'))
     print(f'{ovs_version()} | switch: {", ".join(lab.switches)} | cattura {lab.timeout:g}s per invio')
     cases = [entry for entry in CASES if not args.only or entry.ident in args.only]
-    reports = [run_case(lab, entry) for entry in cases]
+    runner = run_case_paused if args.pause and sys.stdin.isatty() else run_case
+    reports = [runner(lab, entry) for entry in cases]
     skipped_restart = False
     if not args.only or 'T26' in args.only:
         if args.no_restart or not sys.stdin.isatty():
