@@ -9,7 +9,6 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Dipendenze prima del codice, per riusare la cache di build.
 COPY requirements.txt build-constraints.txt ./
 RUN python -m venv .venv \
  && .venv/bin/python -m pip install --no-cache-dir --upgrade pip \
